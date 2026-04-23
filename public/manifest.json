@@ -1,0 +1,15 @@
+
+{
+  "name": "MVGFC E-Library",
+  "short_name": "E-Library",
+  "description": "MVGFC Academic E-Library Management System",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#F1F8E9",
+  "theme_color": "#1B5E20",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Main Library Notice Generator - MVGFC</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #E8F5E9 0%, #C8E6C9 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(27, 94, 32, 0.15);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #1B5E20, #2E7D32);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 42px;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .form-section {
+            padding: 50px 40px;
+        }
+
+        .section-title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #2C3E50;
+            margin-bottom: 30px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-group.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .form-label {
+            font-size: 14px;
+            font-weight: 600;
+            color: #2C3E50;
+            margin-bottom: 8px;
+        }
+
+        .form-input {
+            padding: 12px 16px;
+            border: 2px solid #E0E0E0;
+            border-radius: 8px;
+            font-size: 15px;
+            font-family: inherit;
+            transition: all 0.3s;
+            background: #F9F9F9;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #1B5E20;
+            background: white;
+        }
+
+        .books-section {
+            margin: 30px 0;
+            padding: 20px;
+            background: #F0F8F0;
+            border-radius: 8px;
+            border-left: 4px solid #1B5E20;
+        }
+
+        .book-entry {
+            display: grid;
+            grid-template-columns: 2fr 3fr 1fr 1fr auto;
+            gap: 10px;
+            margin-bottom: 10px;
+            align-items: end;
+        }
+
+        .remove-btn {
+            padding: 12px 16px;
+            background: #f44336;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .remove-btn:hover {
+            background: #d32f2f;
+        }
+
+        .add-book-btn {
+            padding: 12px 24px;
+            background: #2E7D32;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin-top: 10px;
+        }
+
+        .add-book-btn:hover {
+            background: #1B5E20;
+        }
+
+        .checkbox-group {
+            margin: 20px 0;
+            padding: 20px;
+            background: #F0F8F0;
+            border-radius: 8px;
+            border-left: 4px solid #1B5E20;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            font-size: 15px;
+            color: #333;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            margin-right: 10px;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .checkbox-label input[type="text"] {
+            margin-left: 10px;
+            flex: 1;
+            max-width: 300px;
+        }
+
+        .generate-btn {
+            width: 100%;
+            max-width: 400px;
+            margin: 30px auto;
+            display: block;
+            padding: 16px 32px;
+            background: linear-gradient(135deg, #1B5E20, #2E7D32);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(27, 94, 32, 0.3);
+        }
+
+        .generate-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(27, 94, 32, 0.4);
+            background: linear-gradient(135deg, #2E7D32, #388E3C);
+        }
+
+        .preview-section {
+            padding: 50px 40px;
+            background: #F9F9F9;
+            border-top: 2px solid #E8F5E9;
+        }
+
+        .preview-title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #2C3E50;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .notice-preview {
+            position: relative;
+            max-width: 850px;
+            margin: 0 auto;
+            background: white;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+        }
+
+        .notice-preview img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .overlay-text {
+            position: absolute;
+            font-family: Arial, sans-serif;
+            font-size: 11px;
+            color: #000;
+        }
+
+        .download-btn {
+            width: 100%;
+            max-width: 400px;
+            margin: 40px auto 0;
+            display: block;
+            padding: 16px 32px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(33, 150, 243, 0.3);
+        }
+
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(33, 150, 243, 0.4);
+            background: #1976D2;
+        }
+
+        @media (max-width: 768px) {
+            .book-entry {
+                grid-template-columns: 1fr;
+            }
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Main Library Notice Generator</h1>
+        </div>
+
+        <div class="form-section">
+            <h2 class="section-title">Enter Details</h2>
+            <form id="noticeForm">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label class="form-label">Date</label>
+                        <input 
+                            type="date" 
+                            class="form-input" 
+                            id="noticeDate" 
+                            required
+                        >
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">To (Name)</label>
+                        <input 
+                            type="text" 
+                            class="form-input" 
+                            id="recipientName" 
+                            placeholder="e.g., John Doe"
+                            required
+                        >
+                    </div>
+                    <div class="form-group full-width">
+                        <label class="form-label">College/Department</label>
+                        <input 
+                            type="text" 
+                            class="form-input" 
+                            id="department" 
+                            placeholder="e.g., Institute of Nursing"
+                            required
+                        >
+                    </div>
+                </div>
+
+                <div class="books-section">
+                    <h3 class="section-title" style="font-size: 20px; margin-bottom: 20px;">Books/Resources</h3>
+                    <div id="bookEntries">
+                        <div class="book-entry">
+                            <div class="form-group">
+                                <label class="form-label">Author</label>
+                                <input type="text" class="form-input book-author" placeholder="Author name">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Title</label>
+                                <input type="text" class="form-input book-title" placeholder="Book title">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Acc. No.</label>
+                                <input type="text" class="form-input book-acc" placeholder="Acc number">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Due Date</label>
+                                <input type="date" class="form-input book-due">
+                            </div>
+                        </div>
+                    </div>
+                    <button type="button" class="add-book-btn" id="addBookBtn">+ Add Book</button>
+                </div>
+
+                <div class="checkbox-group">
+                    <h3 class="section-title" style="font-size: 20px; margin-bottom: 15px;">Reason</h3>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="reason" value="overdue" id="reasonOverdue">
+                        Now overdue
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="reason" value="reserved" id="reasonReserved">
+                        Which you reserved and are now available
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="reason" value="needed" id="reasonNeeded">
+                        Not yet due but needed immediately for some reasons
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="reason" value="other" id="reasonOther">
+                        Others (specify)
+                        <input type="text" class="form-input" id="otherReason" placeholder="Specify reason">
+                    </label>
+                </div>
+
+                <button type="submit" class="generate-btn">Generate Notice</button>
+            </form>
+        </div>
+
+        <div class="preview-section" id="previewSection" style="display: none;">
+            <h2 class="preview-title">Your Library Notice</h2>
+            
+            <div class="notice-preview">
+                <img src="library-notice-template.png" alt="Library Notice Template" id="noticeBackground">
+                <div id="overlayContainer"></div>
+            </div>
+
+            <button class="download-btn" id="downloadBtn">Download Notice (PDF)</button>
+        </div>
+    </div>
+
+    <script>
+        // CHANGE THIS TO YOUR LIBRARY NOTICE TEMPLATE IMAGE PATH
+        const TEMPLATE_IMAGE_PATH = '/library-notice-template.png';
+        
+        const noticeForm = document.getElementById('noticeForm');
+        const previewSection = document.getElementById('previewSection');
+        const addBookBtn = document.getElementById('addBookBtn');
+        const bookEntries = document.getElementById('bookEntries');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const noticeBackground = document.getElementById('noticeBackground');
+        const overlayContainer = document.getElementById('overlayContainer');
+
+        let bookCount = 1;
+        let backgroundImageData = null;
+
+        // Set background image
+        noticeBackground.src = TEMPLATE_IMAGE_PATH;
+
+        // Load background for PDF
+        function loadBackgroundImage() {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'Anonymous';
+                img.onload = function() {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    backgroundImageData = canvas.toDataURL('image/png');
+                    resolve(backgroundImageData);
+                };
+                img.onerror = function() {
+                    console.log('Background image not found');
+                    resolve(null);
+                };
+                img.src = TEMPLATE_IMAGE_PATH;
+            });
+        }
+
+        loadBackgroundImage();
+
+        // Add book entry
+        addBookBtn.addEventListener('click', function() {
+            if (bookCount >= 5) {
+                alert('Maximum 5 books allowed');
+                return;
+            }
+
+            const bookEntry = document.createElement('div');
+            bookEntry.className = 'book-entry';
+            bookEntry.innerHTML = `
+                <div class="form-group">
+                    <label class="form-label">Author</label>
+                    <input type="text" class="form-input book-author" placeholder="Author name">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Title</label>
+                    <input type="text" class="form-input book-title" placeholder="Book title">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Acc. No.</label>
+                    <input type="text" class="form-input book-acc" placeholder="Acc number">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Due Date</label>
+                    <input type="date" class="form-input book-due">
+                </div>
+                <button type="button" class="remove-btn" onclick="this.parentElement.remove(); bookCount--;">Remove</button>
+            `;
+            bookEntries.appendChild(bookEntry);
+            bookCount++;
+        });
+
+        // Generate notice preview
+        noticeForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const date = document.getElementById('noticeDate').value;
+            const recipient = document.getElementById('recipientName').value;
+            const department = document.getElementById('department').value;
+
+            const formattedDate = new Date(date).toLocaleDateString('en-US', { 
+                year: 'numeric', 
+                month: 'long', 
+                day: 'numeric' 
+            });
+
+            // Clear previous overlays
+            overlayContainer.innerHTML = '';
+
+            // Add DATE overlay (after "DATE:" label)
+            addOverlay(formattedDate, '18%', '15.15%', '16px');
+
+            // Add TO overlay (after "TO:" label)
+            addOverlay(recipient, '15.5%', '16.9%', '16px');
+
+            // Add COLLEGE/DEPT overlay (after "COLLEGE/DEPT.:" label)
+            addOverlay(department, '28.3%', '18.65%', '16px');
+
+            // Add book entries
+            const bookAuthors = document.querySelectorAll('.book-author');
+            const bookTitles = document.querySelectorAll('.book-title');
+            const bookAccs = document.querySelectorAll('.book-acc');
+            const bookDues = document.querySelectorAll('.book-due');
+
+            const bookStartY = 30;
+            const rowHeight = 1.7;
+
+            for (let i = 0; i < 5; i++) {
+                if (i < bookAuthors.length && bookAuthors[i].value) {
+                    // Author
+                    addOverlay(bookAuthors[i].value, '22%', `${bookStartY + (i * rowHeight)}%`, '10px');
+                    // Title
+                    addOverlay(bookTitles[i].value, '44%', `${bookStartY + (i * rowHeight)}%`, '10px');
+                    // Acc No
+                    addOverlay(bookAccs[i].value, '65%', `${bookStartY + (i * rowHeight)}%`, '10px');
+                    // Due Date
+                    if (bookDues[i].value) {
+                        const dueDate = new Date(bookDues[i].value).toLocaleDateString('en-US');
+                        addOverlay(dueDate, '78%', `${bookStartY + (i * rowHeight)}%`, '10px');
+                    }
+                }
+            }
+
+            // Add checkboxes (✓ symbol)
+            const checkStartY = 40.2;
+            const checkGap = 2;
+            
+            if (document.getElementById('reasonOverdue').checked) {
+                addOverlay('✓', '26.5%', `${checkStartY}%`, '14px', 'bold');
+            }
+            if (document.getElementById('reasonReserved').checked) {
+                addOverlay('✓', '26.5%', `${checkStartY + checkGap}%`, '14px', 'bold');
+            }
+            if (document.getElementById('reasonNeeded').checked) {
+                addOverlay('✓', '26.5%', `${checkStartY + (checkGap * 2)}%`, '14px', 'bold');
+            }
+            if (document.getElementById('reasonOther').checked) {
+                addOverlay('✓', '26.5%', `${checkStartY + (checkGap * 3)}%`, '14px', 'bold');
+                const otherText = document.getElementById('otherReason').value;
+                if (otherText) {
+                    addOverlay(otherText, '50%', `${checkStartY + (checkGap * 3)}%`, '16px');
+                }
+            }
+
+            // Show preview
+            previewSection.style.display = 'block';
+            setTimeout(() => {
+                previewSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 100);
+        });
+
+        function addOverlay(text, left, top, fontSize, fontWeight = 'normal') {
+            const overlay = document.createElement('div');
+            overlay.className = 'overlay-text';
+            overlay.textContent = text;
+            overlay.style.left = left;
+            overlay.style.top = top;
+            overlay.style.fontSize = fontSize;
+            overlay.style.fontWeight = fontWeight;
+            overlayContainer.appendChild(overlay);
+        }
+
+        // Download as PDF
+        downloadBtn.addEventListener('click', async function() {
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF({
+                orientation: 'portrait',
+                unit: 'mm',
+                format: 'a4'
+            });
+
+            // Ensure background is loaded
+            if (!backgroundImageData) {
+                await loadBackgroundImage();
+            }
+
+            // Add background image
+            if (backgroundImageData) {
+                pdf.addImage(backgroundImageData, 'PNG', 0, 0, 210, 297);
+            }
+
+            const date = document.getElementById('noticeDate').value;
+            const recipient = document.getElementById('recipientName').value;
+            const department = document.getElementById('department').value;
+
+            const formattedDate = new Date(date).toLocaleDateString('en-US', { 
+                year: 'numeric', 
+                month: 'long', 
+                day: 'numeric' 
+            });
+
+            pdf.setFont(undefined, 'bold');
+            pdf.setFontSize(11);
+
+            // DATE (18%, 15.15%)
+            pdf.text(formattedDate, 37.8, 49);
+
+            // TO (15.5%, 16.9%)
+            pdf.text(recipient, 32.5, 54);
+
+            // DEPARTMENT (28.3%, 18.65%)
+            pdf.text(department, 59.5, 59);
+
+            // Books
+            const bookAuthors = document.querySelectorAll('.book-author');
+            const bookTitles = document.querySelectorAll('.book-title');
+            const bookAccs = document.querySelectorAll('.book-acc');
+            const bookDues = document.querySelectorAll('.book-due');
+
+            pdf.setFontSize(10);
+
+            // bookStartY = 30%
+            let yPos = 92;
+
+            // rowHeight = 1.7%
+            const rowGap = 5.05;
+
+            for (let i = 0; i < 5; i++) {
+                if (i < bookAuthors.length && bookAuthors[i].value) {
+                    // Author (22%)
+                    pdf.text(bookAuthors[i].value, 36, yPos);
+
+                    // Title (44%)
+                    pdf.text(bookTitles[i].value, 72, yPos);
+
+                    // Acc No (65%)
+                    pdf.text(bookAccs[i].value, 133, yPos);
+
+                    // Due Date (78%)
+                    if (bookDues[i].value) {
+                        const dueDate = new Date(bookDues[i].value).toLocaleDateString('en-US');
+                        pdf.text(dueDate, 158, yPos);
+                    }
+                }
+                yPos += rowGap;
+            }
+
+            // Checkboxes
+            pdf.setFontSize(14);
+            pdf.setFont(undefined, 'bold');
+
+            // checkStartY = 40.2%
+            yPos = 125;
+
+            // checkGap = 2%
+            const checkGap = 5.94;
+
+            // X = 26.5%
+            const checkX = 56.5;
+
+            if (document.getElementById('reasonOverdue').checked) {
+                pdf.text('✓', checkX, yPos);
+            }
+            yPos += checkGap;
+
+            if (document.getElementById('reasonReserved').checked) {
+                pdf.text('✓', checkX, yPos);
+            }
+            yPos += checkGap;
+
+            if (document.getElementById('reasonNeeded').checked) {
+                pdf.text('✓', checkX, yPos);
+            }
+            yPos += checkGap;
+
+            if (document.getElementById('reasonOther').checked) {
+                pdf.text('✓', checkX, yPos);
+
+                const otherText = document.getElementById('otherReason').value;
+                if (otherText) {
+                    pdf.setFontSize(11);
+                    pdf.setFont(undefined, 'normal');
+
+                    // Other text (50%)
+                    pdf.text(otherText, 100, yPos - 2);
+                }
+            }
+
+            // Save
+            const fileName = `Library_Notice_${recipient.replace(/\s+/g, '_')}.pdf`;
+            pdf.save(fileName);
+        });
+    </script>
+</body>
+</html>

@@ -34,3 +34,17 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Google service account key
+mvgfc-e-library-3a319dd2877f.json
+
+.env.local
+.env*.local
+
+node_modules/
+.next/
+.env.local
+.env*.local
+*.log
+.DS_Store
+
