@@ -91,7 +91,7 @@ export default function ProfilePage() {
           </div>
         ))}
       </div>
-              // In the account info section, add these rows:
+
 
         {user.userType === 'student' && (
           <>
