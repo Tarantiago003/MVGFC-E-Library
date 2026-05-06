@@ -1,39 +1,39 @@
 import { useState } from 'react'
 import DashboardLayout from '../../components/layout/DashboardLayout'
-import BorrowFilters from '../../components/borrows/BorrowFilters'
-import BorrowsTable from '../../components/borrows/BorrowsTable'
-import OverduePanel from '../../components/borrows/OverduePanel' // NEW
-import ApproveModal from '../../components/borrows/ApproveModal'
-import RejectModal from '../../components/borrows/RejectModal'
-import Modal from '../../components/ui/Modal'
-import Spinner from '../../components/ui/Spinner'
-import EmptyState from '../../components/ui/EmptyState'
-import Toast from '../../components/ui/Toast'
+import BorrowFilters   from '../../components/borrows/BorrowFilters'
+import BorrowsTable    from '../../components/borrows/BorrowsTable'
+import OverduePanel    from '../../components/borrows/OverduePanel'
+import ApproveModal    from '../../components/borrows/ApproveModal'
+import RejectModal     from '../../components/borrows/RejectModal'
+import Modal           from '../../components/ui/Modal'
+import Spinner         from '../../components/ui/Spinner'
+import EmptyState      from '../../components/ui/EmptyState'
+import Toast           from '../../components/ui/Toast'
 import { useDashboardBorrows } from '../../hooks/useDashboardBorrows'
-import { useDashboardUsers } from '../../hooks/useDashboardUsers'
-import { withDashboardAuth } from '../../components/guards/withDashboardAuth'
+import { useDashboardUsers }   from '../../hooks/useDashboardUsers'
+import { withDashboardAuth }   from '../../components/guards/withDashboardAuth'
 import useSWR from 'swr'
-import api from '../../lib/api'
+import api    from '../../lib/api'
 
 export default function BorrowsPage() {
   const { borrows, loading, approveBorrow, rejectBorrow, returnBorrow } = useDashboardBorrows()
-  const { users } = useDashboardUsers()
+  const { users }  = useDashboardUsers()
   const { data: books = [] } = useSWR('/books', url => api.get(url).then(d => d.data))
 
-  const [filters, setFilters] = useState({ status: 'ALL', library: 'ALL', search: '' })
-  const [approveTarget, setApprove] = useState(null)
-  const [rejectTarget, setReject] = useState(null)
-  const [returnTarget, setReturn] = useState(null)
-  const [actionLoading, setActLoad] = useState(false)
-  const [toast, setToast] = useState(null)
-  const [showOverdue, setShowOverdue] = useState(false) // NEW
+  const [filters,       setFilters]  = useState({ status: 'ALL', library: 'ALL', search: '' })
+  const [approveTarget, setApprove]  = useState(null)
+  const [rejectTarget,  setReject]   = useState(null)
+  const [returnTarget,  setReturn]   = useState(null)
+  const [actionLoading, setActLoad]  = useState(false)
+  const [toast,         setToast]    = useState(null)
+  const [showOverdue,   setOverdue]  = useState(false)
 
-  function showToast(message, type = 'success') { setToast({ message, type }) }
+  function showToast(msg, type = 'success') { setToast({ message: msg, type }) }
   function patchFilter(patch) { setFilters(prev => ({ ...prev, ...patch })) }
 
   // Client-side filter
   let filtered = [...borrows]
-  if (filters.status !== 'ALL') filtered = filtered.filter(b => b.status === filters.status)
+  if (filters.status  !== 'ALL') filtered = filtered.filter(b => b.status   === filters.status)
   if (filters.library !== 'ALL') filtered = filtered.filter(b => b.location === filters.library)
   if (filters.search) {
     const q = filters.search.toLowerCase()
@@ -43,17 +43,28 @@ export default function BorrowsPage() {
   }
   filtered.sort((a, b) => new Date(b.requestDate) - new Date(a.requestDate))
 
-  // NEW: Send overdue reminder
+  // Count overdue for badge
+  const overdueCount = borrows.filter(b => {
+    if (b.status !== 'APPROVED' || !b.dueDate) return false
+    return Date.now() > new Date(b.dueDate).getTime()
+  }).length
+
   async function handleSendReminder(borrowId) {
     setActLoad(true)
     try {
       await api.post(`/borrows/${borrowId}/remind`)
-      showToast('Reminder sent successfully!')
-    } catch (e) {
-      showToast(e.message, 'error')
-    } finally {
-      setActLoad(false)
-    }
+      showToast('Reminder sent and posted to borrower chat!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleExtend(borrowId, dueDate) {
+    setActLoad(true)
+    try {
+      await api.patch(`/borrows/${borrowId}/extend`, { dueDate })
+      showToast('Due date extended successfully!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
   }
 
   async function handleApprove(id, dueDate) {
@@ -63,7 +74,7 @@ export default function BorrowsPage() {
       setApprove(null)
       showToast('Request approved successfully!')
     } catch (e) { showToast(e.message, 'error') }
-    finally { setActLoad(false) }
+    finally     { setActLoad(false) }
   }
 
   async function handleReject(id, notes) {
@@ -73,7 +84,7 @@ export default function BorrowsPage() {
       setReject(null)
       showToast('Request rejected.')
     } catch (e) { showToast(e.message, 'error') }
-    finally { setActLoad(false) }
+    finally     { setActLoad(false) }
   }
 
   async function handleReturn(id) {
@@ -83,85 +94,70 @@ export default function BorrowsPage() {
       setReturn(null)
       showToast('Book marked as returned!')
     } catch (e) { showToast(e.message, 'error') }
-    finally { setActLoad(false) }
+    finally     { setActLoad(false) }
   }
 
   return (
     <DashboardLayout title="Borrow Management">
-      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+      {toast && <Toast {...toast} onClose={() => setToast(null)}/>}
 
-      {/* NEW: Overdue section toggle */}
+      {/* View toggle */}
       <div className="flex gap-3 mb-5">
-        <button
-          onClick={() => setShowOverdue(false)}
-          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition ${
-            !showOverdue
+        <button onClick={() => setOverdue(false)}
+          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${!showOverdue
               ? 'bg-green-700 text-white'
-              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'
-          }`}>
+              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'}`}>
           📋 All Requests
         </button>
-        <button
-          onClick={() => setShowOverdue(true)}
-          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition ${
-            showOverdue
+        <button onClick={() => setOverdue(true)}
+          className={`relative flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${showOverdue
               ? 'bg-red-600 text-white'
-              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'
-          }`}>
+              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'}`}>
           ⚠️ Overdue Books
+          {overdueCount > 0 && (
+            <span className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-[10px] font-bold
+              flex items-center justify-center
+              ${showOverdue ? 'bg-white text-red-600' : 'bg-red-500 text-white'}`}>
+              {overdueCount > 9 ? '9+' : overdueCount}
+            </span>
+          )}
         </button>
       </div>
 
       {showOverdue ? (
-        loading ? (
-          <Spinner />
-        ) : (
+        loading ? <Spinner/> : (
           <OverduePanel
             borrows={borrows}
             users={users}
             books={books}
             onSendReminder={handleSendReminder}
+            onExtend={handleExtend}
           />
         )
       ) : (
         <>
-          <BorrowFilters {...filters} onChange={patchFilter} />
-
-          {loading ? (
-            <Spinner />
-          ) : filtered.length === 0 ? (
-            <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters." />
-          ) : (
-            <BorrowsTable
-              borrows={filtered}
-              users={users}
-              books={books}
-              onApprove={b => setApprove(b)}
-              onReject={b => setReject(b)}
-              onReturn={b => setReturn(b)}
-            />
-          )}
+          <BorrowFilters {...filters} onChange={patchFilter}/>
+          {loading ? <Spinner/> : filtered.length === 0
+            ? <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters."/>
+            : <BorrowsTable
+                borrows={filtered} users={users} books={books}
+                onApprove={b => setApprove(b)}
+                onReject={b  => setReject(b)}
+                onReturn={b  => setReturn(b)}
+              />
+          }
         </>
       )}
 
-      <ApproveModal
-        open={!!approveTarget}
-        borrow={approveTarget}
-        loading={actionLoading}
-        onConfirm={handleApprove}
-        onClose={() => setApprove(null)}
-      />
+      <ApproveModal open={!!approveTarget} borrow={approveTarget}
+        loading={actionLoading} onConfirm={handleApprove} onClose={() => setApprove(null)}/>
 
-      <RejectModal
-        open={!!rejectTarget}
-        borrow={rejectTarget}
-        loading={actionLoading}
-        onConfirm={handleReject}
-        onClose={() => setReject(null)}
-      />
+      <RejectModal open={!!rejectTarget} borrow={rejectTarget}
+        loading={actionLoading} onConfirm={handleReject} onClose={() => setReject(null)}/>
 
-      {/* Return confirmation modal */}
-      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✓ Confirm Return">
+      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✔ Confirm Return">
         <div className="space-y-4">
           <p className="text-sm text-gray-600">
             Mark borrow request{' '}
@@ -169,17 +165,15 @@ export default function BorrowsPage() {
             returned? This will restore the book's available copy count.
           </p>
           <div className="flex gap-3 pt-2">
-            <button
-              onClick={() => setReturn(null)}
-              disabled={actionLoading}
-              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold py-2.5 rounded-xl hover:bg-gray-50 transition">
+            <button onClick={() => setReturn(null)} disabled={actionLoading}
+              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
+                py-2.5 rounded-xl hover:bg-gray-50 transition">
               Cancel
             </button>
-            <button
-              onClick={() => handleReturn(returnTarget.id)}
-              disabled={actionLoading}
-              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl hover:bg-blue-700 transition disabled:opacity-50">
-              {actionLoading ? 'Confirming…' : '✓ Confirm Return'}
+            <button onClick={() => handleReturn(returnTarget.id)} disabled={actionLoading}
+              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
+                hover:bg-blue-700 transition disabled:opacity-50">
+              {actionLoading ? 'Confirming…' : '✔ Confirm Return'}
             </button>
           </div>
         </div>

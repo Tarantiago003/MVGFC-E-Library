@@ -105,7 +105,9 @@ pages/api/auth/[...nextauth].js
 pages/api/auth/register.js
 pages/api/books/[id].js
 pages/api/books/index.js
+pages/api/borrows/[id]/extend.js
 pages/api/borrows/[id]/remind.js
+pages/api/borrows/[id]/renew.js
 pages/api/borrows/[id]/status.js
 pages/api/borrows/index.js
 pages/api/chat/messages.js
@@ -153,6 +155,168 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
+<file path="pages/api/borrows/[id]/extend.js">
+import Joi from 'joi'
+import { v4 as uuid } from 'uuid'
+import { compose }     from '../../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { withRole }    from '../../../../middleware/withRole'
+import { rateLimiter } from '../../../../middleware/rateLimiter'
+import { trigger, ch } from '../../../../lib/pusher'
+import { readSheet, appendRow, batchUpdate, rowNum, cellRange } from '../../../../lib/sheets'
+import {
+  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS
+} from '../../../../lib/constants'
+
+const schema = Joi.object({
+  dueDate: Joi.string().isoDate().required()
+})
+
+async function handlerExtend(req, res) {
+  if (req.method !== 'PATCH')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { id } = req.query
+  const { error, value } = schema.validate(req.body)
+  if (error) httpError(400, error.details[0].message)
+
+  const { dueDate } = value
+  const rows   = await readSheet(SHEETS.BORROWS)
+  const borrow = rows.find(r => r[COL.BORROWS.ID] === id)
+
+  if (!borrow) httpError(404, 'Borrow request not found')
+  if (borrow[COL.BORROWS.STATUS] !== BORROW_STATUS.APPROVED)
+    httpError(400, 'Can only extend due date for approved borrows')
+
+  // Clerks can only manage their assigned library
+  if (req.user.role === ROLES.CLERK) {
+    if (borrow[COL.BORROWS.LOCATION] !== req.user.assignedLibrary)
+      httpError(403, 'This borrow belongs to a different library')
+  }
+
+  const rn  = rowNum(rows, COL.BORROWS.ID, id)
+  if (rn === -1) httpError(404, 'Borrow row not found')
+
+  const now  = new Date().toISOString()
+  const note = `Due date extended to ${dueDate} by ${req.user.name} on ${now}`
+
+  await batchUpdate([
+    { range: cellRange(SHEETS.BORROWS, rn, COL.BORROWS.DUE_DATE), values: [dueDate] },
+    { range: cellRange(SHEETS.BORROWS, rn, COL.BORROWS.NOTES),    values: [note]    }
+  ])
+
+  // Notify the borrower
+  const borrowerId = borrow[COL.BORROWS.USER_ID]
+  const formattedDue = new Date(dueDate).toLocaleDateString('en-PH', {
+    year: 'numeric', month: 'long', day: 'numeric'
+  })
+
+  await appendRow(SHEETS.NOTIFICATIONS, [
+    uuid(), borrowerId,
+    NOTIF_TYPE.BORROW_APPROVED,
+    '📅 Due Date Extended',
+    `Great news! Your borrowing due date has been extended to ${formattedDue}.`,
+    id, 'FALSE', now
+  ])
+
+  await trigger(ch.borrowStat(borrowerId), 'status-updated', {
+    requestId: id,
+    status:    BORROW_STATUS.APPROVED,
+    message:   `Your due date has been extended to ${formattedDue}`
+  })
+
+  res.json({ success: true, message: `Due date extended to ${formattedDue}.` })
+}
+
+export default compose(
+  withErrorHandler,
+  rateLimiter(),
+  withAuth,
+  withRole(ROLES.ADMIN, ROLES.CLERK)
+)(handlerExtend)
+</file>
+
+<file path="pages/api/borrows/[id]/renew.js">
+import { v4 as uuid } from 'uuid'
+import { compose }     from '../../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { rateLimiter } from '../../../../middleware/rateLimiter'
+import { trigger, ch } from '../../../../lib/pusher'
+import { readSheet, appendRow } from '../../../../lib/sheets'
+import {
+  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS, THREAD_STATUS
+} from '../../../../lib/constants'
+
+async function handlerRenew(req, res) {
+  if (req.method !== 'POST')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  if (req.user.role !== ROLES.USER)
+    httpError(403, 'Only borrowers can request renewals')
+
+  const { id } = req.query
+  const borrows = await readSheet(SHEETS.BORROWS)
+  const borrow  = borrows.find(r => r[COL.BORROWS.ID] === id)
+
+  if (!borrow) httpError(404, 'Borrow request not found')
+  if (borrow[COL.BORROWS.USER_ID] !== req.user.id) httpError(403, 'Access denied')
+  if (borrow[COL.BORROWS.STATUS]  !== BORROW_STATUS.APPROVED)
+    httpError(400, 'Can only request renewal for approved borrows')
+
+  const location  = borrow[COL.BORROWS.LOCATION]
+  const bookId    = borrow[COL.BORROWS.BOOK_ID]
+  const dueDate   = borrow[COL.BORROWS.DUE_DATE]
+  const timestamp = new Date().toISOString()
+
+  const formattedDue = dueDate
+    ? new Date(dueDate).toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })
+    : 'N/A'
+
+  // Message posted to the user's own chat thread so staff can see & respond
+  const chatText = `📖 Renewal Request — Hi! I would like to request a renewal for Assc. No. ${bookId}. Current due date: ${formattedDue}. Please let me know if it can be extended. Thank you!`
+
+  const chatId = uuid()
+  await appendRow(SHEETS.CHAT, [
+    chatId,
+    req.user.id,        // threadId = userId
+    req.user.id,        // senderId
+    ROLES.USER,         // senderRole
+    'INQUIRY',          // messageType
+    chatText,
+    timestamp,
+    'FALSE',
+    THREAD_STATUS.OPEN,
+    location
+  ])
+
+  // Real-time: update user's own chat page
+  await trigger(ch.chat(req.user.id), 'new-message', {
+    id:          chatId,
+    threadId:    req.user.id,
+    senderId:    req.user.id,
+    senderName:  req.user.name,
+    senderRole:  ROLES.USER,
+    messageText: chatText,
+    timestamp,
+    libraryLocation: location
+  })
+
+  // Real-time: notify admin inbox (thread list refresh)
+  await trigger(ch.adminInbox(location), 'new-chat-message', {
+    threadId: req.user.id,
+    userName: req.user.name,
+    preview:  chatText.substring(0, 80),
+    library:  location
+  })
+
+  res.json({ success: true, message: 'Renewal request sent to library staff.' })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerRenew)
+</file>
+
 <file path="components/borrow/BookCard.jsx">
 export default function BookCard({ book, selected, onClick }) {
   const avail = book.available > 0
@@ -180,24 +344,69 @@ export default function BookCard({ book, selected, onClick }) {
 </file>
 
 <file path="components/borrow/BorrowCard.jsx">
-import StatusBadge from '../ui/StatusBadge'
-import { fmtDate } from '../../lib/utils'
+import { useState }   from 'react'
+import StatusBadge     from '../ui/StatusBadge'
+import Toast           from '../ui/Toast'
+import { fmtDate }     from '../../lib/utils'
+import api             from '../../lib/api'
+
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  const diff = Date.now() - new Date(dueDate).getTime()
+  return Math.max(0, Math.floor(diff / 86400000))
+}
 
 export default function BorrowCard({ borrow, book }) {
+  const [renewing, setRenewing] = useState(false)
+  const [toast,    setToast]    = useState(null)
+
+  const isApproved = borrow.status === 'APPROVED'
+  const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
+  const isOverdue   = daysOverdue > 0
+
+  async function handleRenew() {
+    setRenewing(true)
+    try {
+      await api.post(`/borrows/${borrow.id}/renew`)
+      setToast({ message: 'Renewal request sent to library staff!', type: 'success' })
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
+    } finally {
+      setRenewing(false)
+    }
+  }
+
   return (
-    <div className="bg-white rounded-2xl border border-green-100 shadow-card p-4">
+    <div className={`bg-white rounded-2xl border shadow-card p-4
+      ${isOverdue ? 'border-red-200' : 'border-green-100'}`}>
+
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+
       <div className="flex gap-3 items-start">
         {book?.coverImageUrl
           ? <img src={book.coverImageUrl} alt={book.title} className="w-10 h-14 object-cover rounded-lg flex-shrink-0"/>
-          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📘</div>
+          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📚</div>
         }
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-gray-800 truncate">{book?.title || `Assc. No. ${borrow.bookId}`}</p>
+          <p className="text-sm font-semibold text-gray-800 truncate">
+            {book?.title || `Assc. No. ${borrow.bookId}`}
+          </p>
           <p className="text-xs text-gray-500 truncate">{book?.author}</p>
           <p className="text-xs text-green-700 mt-1">{borrow.location?.replace('_', ' ')}</p>
         </div>
-        <StatusBadge status={borrow.status}/>
+
+        <div className="flex flex-col items-end gap-1">
+          <StatusBadge status={borrow.status}/>
+          {/* OVERDUE BADGE */}
+          {isOverdue && (
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
+              ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
+              {daysOverdue}d overdue
+            </span>
+          )}
+        </div>
       </div>
+
       <div className="mt-3 pt-3 border-t border-green-50 grid grid-cols-2 gap-2">
         <div>
           <p className="text-[10px] text-gray-400 uppercase font-medium">Requested</p>
@@ -206,7 +415,9 @@ export default function BorrowCard({ borrow, book }) {
         {borrow.dueDate && (
           <div>
             <p className="text-[10px] text-gray-400 uppercase font-medium">Due Date</p>
-            <p className="text-xs text-gray-700">{fmtDate(borrow.dueDate)}</p>
+            <p className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-700'}`}>
+              {fmtDate(borrow.dueDate)}
+            </p>
           </div>
         )}
         {borrow.notes && (
@@ -216,6 +427,19 @@ export default function BorrowCard({ borrow, book }) {
           </div>
         )}
       </div>
+
+      {/* RENEW BUTTON — only for approved borrows */}
+      {isApproved && (
+        <button
+          onClick={handleRenew}
+          disabled={renewing}
+          className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
+            ${isOverdue
+              ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
+              : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
+          {renewing ? 'Sending request…' : '🔄 Request Renewal'}
+        </button>
+      )}
     </div>
   )
 }
@@ -443,9 +667,9 @@ export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, u
 </file>
 
 <file path="components/borrows/OverduePanel.jsx">
-import { useState } from 'react'
-import StatusBadge from '../ui/StatusBadge'
-import Modal from '../ui/Modal'
+import { useState }  from 'react'
+import Modal           from '../ui/Modal'
+import api             from '../../lib/api'
 
 function fmtDate(iso) {
   if (!iso) return '—'
@@ -454,34 +678,43 @@ function fmtDate(iso) {
 
 function getDaysOverdue(dueDate) {
   if (!dueDate) return 0
-  const due = new Date(dueDate)
-  const now = new Date()
-  const diff = now - due
-  return Math.floor(diff / (1000 * 60 * 60 * 24))
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
 }
 
-export default function OverduePanel({ borrows, users, books, onSendReminder }) {
-  const [selectedBorrow, setSelectedBorrow] = useState(null)
-  const [sending, setSending] = useState(false)
+export default function OverduePanel({ borrows, users, books, onSendReminder, onExtend }) {
+  const [reminderTarget, setReminderTarget] = useState(null)
+  const [extendTarget,   setExtendTarget]   = useState(null)
+  const [newDueDate,     setNewDueDate]      = useState('')
+  const [sending,        setSending]         = useState(false)
+  const [extending,      setExtending]       = useState(false)
 
-  // Filter for overdue borrows
-  const overdueBorrows = borrows.filter(b => {
-    if (b.status !== 'APPROVED') return false
-    if (!b.dueDate) return false
-    return getDaysOverdue(b.dueDate) > 0
-  }).sort((a, b) => getDaysOverdue(b.dueDate) - getDaysOverdue(a.dueDate))
+  const overdueBorrows = borrows
+    .filter(b => b.status === 'APPROVED' && b.dueDate && getDaysOverdue(b.dueDate) > 0)
+    .sort((a, b) => getDaysOverdue(b.dueDate) - getDaysOverdue(a.dueDate))
 
   const userMap = Object.fromEntries((users || []).map(u => [u.id, u]))
   const bookMap = Object.fromEntries((books || []).map(b => [b.id, b]))
 
   async function handleSendReminder() {
-    if (!selectedBorrow) return
+    if (!reminderTarget) return
     setSending(true)
     try {
-      await onSendReminder(selectedBorrow.id)
-      setSelectedBorrow(null)
+      await onSendReminder(reminderTarget.id)
+      setReminderTarget(null)
     } finally {
       setSending(false)
+    }
+  }
+
+  async function handleExtend() {
+    if (!extendTarget || !newDueDate) return
+    setExtending(true)
+    try {
+      await onExtend(extendTarget.id, newDueDate)
+      setExtendTarget(null)
+      setNewDueDate('')
+    } finally {
+      setExtending(false)
     }
   }
 
@@ -506,21 +739,21 @@ export default function OverduePanel({ borrows, users, books, onSendReminder }) 
 
         <div className="divide-y divide-red-50">
           {overdueBorrows.map(b => {
-            const u = userMap[b.userId]
-            const bk = bookMap[b.bookId]
-            const daysOverdue = getDaysOverdue(b.dueDate)
+            const u   = userMap[b.userId]
+            const bk  = bookMap[b.bookId]
+            const days = getDaysOverdue(b.dueDate)
 
             return (
               <div key={b.id} className="px-5 py-4 hover:bg-red-50/50 transition">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-2">
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
                       <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold
-                        ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
-                        {daysOverdue} day{daysOverdue > 1 ? 's' : ''} overdue
+                        ${days > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
+                        {days} day{days > 1 ? 's' : ''} overdue
                       </span>
                       <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
-                        {b.location === 'HIGH_SCHOOL' ? '🎓 HS' : '📚 Main'}
+                        {b.location === 'HIGH_SCHOOL' ? '🏫 HS' : '📚 Main'}
                       </span>
                     </div>
 
@@ -542,12 +775,22 @@ export default function OverduePanel({ borrows, users, books, onSendReminder }) 
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => setSelectedBorrow(b)}
-                    className="flex-shrink-0 bg-red-600 hover:bg-red-700 text-white 
-                      px-4 py-2 rounded-lg text-xs font-semibold transition">
-                    📧 Send Reminder
-                  </button>
+                  <div className="flex flex-col gap-2 flex-shrink-0">
+                    <button
+                      onClick={() => setReminderTarget(b)}
+                      className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition">
+                      📩 Remind
+                    </button>
+                    <button
+                      onClick={() => {
+                        setExtendTarget(b)
+                        // Default to 7 days from today
+                        setNewDueDate(new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0])
+                      }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition">
+                      📅 Extend
+                    </button>
+                  </div>
                 </div>
               </div>
             )
@@ -556,43 +799,83 @@ export default function OverduePanel({ borrows, users, books, onSendReminder }) 
       </div>
 
       {/* Reminder confirmation modal */}
-      <Modal open={!!selectedBorrow} onClose={() => setSelectedBorrow(null)} 
-        title="📧 Send Overdue Reminder">
-        {selectedBorrow && (
+      <Modal open={!!reminderTarget} onClose={() => setReminderTarget(null)}
+        title="📩 Send Overdue Reminder">
+        {reminderTarget && (
           <div className="space-y-4">
             <div className="bg-red-50 border border-red-100 rounded-xl p-4">
               <p className="text-sm font-semibold text-red-800 mb-2">
-                Send reminder to: {userMap[selectedBorrow.userId]?.name}
+                Send reminder to: {userMap[reminderTarget.userId]?.name}
               </p>
-              <p className="text-xs text-gray-600">
-                Email: {userMap[selectedBorrow.userId]?.email}
-              </p>
+              <p className="text-xs text-gray-600">Email: {userMap[reminderTarget.userId]?.email}</p>
               <p className="text-xs text-gray-600 mt-1">
-                Book: {bookMap[selectedBorrow.bookId]?.title || selectedBorrow.bookId}
+                Book: {bookMap[reminderTarget.bookId]?.title || reminderTarget.bookId}
               </p>
               <p className="text-xs text-red-600 font-semibold mt-2">
-                {getDaysOverdue(selectedBorrow.dueDate)} days overdue
+                {getDaysOverdue(reminderTarget.dueDate)} days overdue
               </p>
             </div>
-
             <p className="text-sm text-gray-600">
-              This will send an email reminder to the borrower about returning the book.
+              This will send an in-app notification <strong>and</strong> post a message in the
+              borrower's chat thread so they can reply.
             </p>
-
             <div className="flex gap-3 pt-2">
-              <button
-                onClick={() => setSelectedBorrow(null)}
-                disabled={sending}
-                className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold 
+              <button onClick={() => setReminderTarget(null)} disabled={sending}
+                className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
                   py-2.5 rounded-xl hover:bg-gray-50 transition disabled:opacity-50">
                 Cancel
               </button>
-              <button
-                onClick={handleSendReminder}
-                disabled={sending}
-                className="flex-1 bg-red-600 text-white font-semibold py-2.5 rounded-xl 
+              <button onClick={handleSendReminder} disabled={sending}
+                className="flex-1 bg-red-600 text-white font-semibold py-2.5 rounded-xl
                   hover:bg-red-700 transition disabled:opacity-50">
                 {sending ? 'Sending…' : '✉️ Send Reminder'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Extend due date modal */}
+      <Modal open={!!extendTarget} onClose={() => { setExtendTarget(null); setNewDueDate('') }}
+        title="📅 Extend Due Date">
+        {extendTarget && (
+          <div className="space-y-4">
+            <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-sm">
+              <p className="font-semibold text-blue-800 mb-1">
+                {bookMap[extendTarget.bookId]?.title || `Assc. No. ${extendTarget.bookId}`}
+              </p>
+              <p className="text-gray-600">
+                Borrower: {userMap[extendTarget.userId]?.name}
+              </p>
+              <p className="text-red-600 text-xs font-semibold mt-1">
+                Currently {getDaysOverdue(extendTarget.dueDate)} days overdue
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                New Due Date <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="date"
+                value={newDueDate}
+                min={new Date().toISOString().split('T')[0]}
+                onChange={e => setNewDueDate(e.target.value)}
+                className="w-full border border-green-200 rounded-xl px-3 py-2.5 text-sm
+                  focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+            </div>
+
+            <div className="flex gap-3 pt-2">
+              <button onClick={() => { setExtendTarget(null); setNewDueDate('') }} disabled={extending}
+                className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
+                  py-2.5 rounded-xl hover:bg-gray-50 transition disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={handleExtend} disabled={extending || !newDueDate}
+                className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
+                  hover:bg-blue-700 transition disabled:opacity-50">
+                {extending ? 'Extending…' : '✅ Extend'}
               </button>
             </div>
           </div>
@@ -1158,7 +1441,11 @@ export default function BottomNav() {
     <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-green-200 shadow-nav z-30 safe-bottom">
       <div className="flex max-w-lg mx-auto">
         {NAV.map(({ href, label, icon }) => {
-          const active = pathname.startsWith(href) && (href !== '/dashboard' || pathname === '/dashboard')
+          // FIX: Use exact match for all nav items to prevent both Borrow and Status
+          // highlighting at the same time. /borrow matches only itself; /borrow/status
+          // matches only itself. Dashboard also uses exact match.
+          const active = pathname === href
+
           return (
             <Link key={href} href={href}
               className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors
@@ -2162,31 +2449,34 @@ export const NOTIF_TYPE = {
   BORROW_APPROVED:  'BORROW_APPROVED',
   BORROW_REJECTED:  'BORROW_REJECTED',
   BORROW_DUE:       'BORROW_DUE',
+  BORROW_RENEWED:   'BORROW_RENEWED',   // NEW — renewal request notification
   CHAT_REPLY:       'CHAT_REPLY',
   ACCOUNT_STATUS:   'ACCOUNT_STATUS'
 }
 
 // Exact Google Sheet tab names
 export const SHEETS = {
-  USERS:              'Users',
-  BOOKS_MAIN:         'Books_MainLibrary',
-  BOOKS_HS:           'Books_HighSchool',
-  BORROWS:            'BorrowRequests',
-  CHAT:               'ChatMessages',
-  NOTIFICATIONS:      'Notifications'
+  USERS:         'Users',
+  BOOKS_MAIN:    'Books_MainLibrary',
+  BOOKS_HS:      'Books_HighSchool',
+  BORROWS:       'BorrowRequests',
+  CHAT:          'ChatMessages',
+  NOTIFICATIONS: 'Notifications'
 }
 
-// NOTE: "ID" column in Books sheet represents "Accession Number" (Assc. No.)
+// NOTE: Books col 0 = "Assc. No." (displayed as Accession Number, not "BookID")
+// NOTE: Books col 3 renamed from ISBN → YEAR (publication year); update your Sheet header too
 export const COL = {
   USERS: {
     ID:0, NAME:1, EMAIL:2, ROLE:3, DEPT:4,
     STATUS:5, GOOGLE_ID:6, CREATED:7, LAST_LOGIN:8,
     USER_TYPE:9, STUDENT_ID:10, YEAR:11, SECTION:12,
     EMPLOYEE_NUM:13, POSITION:14, OFFICE:15, ASSIGNED_LIBRARY:16,
-    PASSWORD:17  // NEW: Password column
+    PASSWORD:17
   },
   BOOKS: {
-    ID:0, TITLE:1, AUTHOR:2, ISBN:3, CATEGORY:4, LOCATION:5,
+    // Col 0 label in Sheet: "Assc. No."  |  Col 3 label in Sheet: "Year"
+    ID:0, TITLE:1, AUTHOR:2, YEAR:3, CATEGORY:4, LOCATION:5,
     TOTAL:6, AVAILABLE:7, DESC:8, COVER:9, ADDED_AT:10, ADDED_BY:11
   },
   BORROWS: {
@@ -2540,6 +2830,15 @@ module.exports = withPWA({
 })
 </file>
 
+<file path="next.config.mjs">
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  reactStrictMode: true,
+};
+
+export default nextConfig;
+</file>
+
 <file path="pages/_app.jsx">
 import { SessionProvider } from 'next-auth/react'
 import '../styles/globals.css'
@@ -2873,18 +3172,19 @@ export default async function handler(req, res) {
 
 <file path="pages/api/books/[id].js">
 import Joi from 'joi'
-import { compose } from '../../../lib/compose'
+import { compose }    from '../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
-import { withAuth } from '../../../middleware/withAuth'
+import { withAuth }   from '../../../middleware/withAuth'
 import { rateLimiter } from '../../../middleware/rateLimiter'
-import * as cache from '../../../lib/cache'
+import * as cache     from '../../../lib/cache'
 import { readSheet, batchUpdate, rowNum, cellRange } from '../../../lib/sheets'
-import { SHEETS, COL, ROLES, LIBRARY } from '../../../lib/constants'
-import { getBooks, toBook } from './index'
+import { SHEETS, COL, ROLES } from '../../../lib/constants'
+import { getBooks, toBook }   from './index'
 
 const updateSchema = Joi.object({
   title:         Joi.string().max(255),
   author:        Joi.string().max(255),
+  year:          Joi.string().max(10).allow(''),   // renamed from isbn
   category:      Joi.string().max(100),
   description:   Joi.string().max(1000).allow(''),
   coverImageUrl: Joi.string().uri().allow(''),
@@ -2908,23 +3208,32 @@ async function handlerBook(req, res) {
     const { error, value } = updateSchema.validate(req.body)
     if (error) httpError(400, error.details[0].message)
 
-    const freshRows = await readSheet(SHEETS.BOOKS)
+    const location  = book[COL.BOOKS.LOCATION]
+    const sheetName = location === 'HIGH_SCHOOL' ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+
+    const freshRows = await readSheet(sheetName)
     const rn = rowNum(freshRows, COL.BOOKS.ID, id)
     if (rn === -1) httpError(404, 'Book not found')
 
     const updates = []
     const map = {
-      title: COL.BOOKS.TITLE, author: COL.BOOKS.AUTHOR, category: COL.BOOKS.CATEGORY,
-      description: COL.BOOKS.DESC, coverImageUrl: COL.BOOKS.COVER,
-      totalCopies: COL.BOOKS.TOTAL, available: COL.BOOKS.AVAILABLE
+      title:         COL.BOOKS.TITLE,
+      author:        COL.BOOKS.AUTHOR,
+      year:          COL.BOOKS.YEAR,        // renamed from isbn
+      category:      COL.BOOKS.CATEGORY,
+      description:   COL.BOOKS.DESC,
+      coverImageUrl: COL.BOOKS.COVER,
+      totalCopies:   COL.BOOKS.TOTAL,
+      available:     COL.BOOKS.AVAILABLE
     }
     for (const [key, colIdx] of Object.entries(map)) {
       if (value[key] !== undefined)
-        updates.push({ range: cellRange(SHEETS.BOOKS, rn, colIdx), values: [value[key]] })
+        updates.push({ range: cellRange(sheetName, rn, colIdx), values: [value[key]] })
     }
 
     if (updates.length) await batchUpdate(updates)
     cache.del('books')
+    cache.del(`books_${location}`)
     return res.json({ success: true, message: 'Book updated' })
   }
 
@@ -2938,12 +3247,11 @@ export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerBook)
 <file path="pages/api/books/index.js">
 import Joi from 'joi'
 import { v4 as uuid } from 'uuid'
-import { compose } from '../../../lib/compose'
+import { compose }    from '../../../lib/compose'
 import { withErrorHandler } from '../../../middleware/errorHandler'
-import { withAuth } from '../../../middleware/withAuth'
-import { withRole } from '../../../middleware/withRole'
+import { withAuth }   from '../../../middleware/withAuth'
 import { rateLimiter } from '../../../middleware/rateLimiter'
-import * as cache from '../../../lib/cache'
+import * as cache     from '../../../lib/cache'
 import { SHEETS, COL, ROLES, LIBRARY } from '../../../lib/constants'
 import { readSheet, appendRow, batchRead } from '../../../lib/sheets'
 
@@ -2951,20 +3259,12 @@ const BOOKS_TTL = parseInt(process.env.CACHE_TTL_BOOKS_MS) || 10 * 60 * 1000
 
 export async function getBooks(libraryLocation = null) {
   if (!libraryLocation) {
-    // Fetch from both sheets and combine
-    const [mainRows, hsRows] = await batchRead([
-      SHEETS.BOOKS_MAIN,
-      SHEETS.BOOKS_HS
-    ])
-    const cached = [...mainRows, ...hsRows]
-    cache.set('books', cached, BOOKS_TTL)
-    return cached
+    const [mainRows, hsRows] = await batchRead([SHEETS.BOOKS_MAIN, SHEETS.BOOKS_HS])
+    const combined = [...mainRows, ...hsRows]
+    cache.set('books', combined, BOOKS_TTL)
+    return combined
   }
-  
-  // Fetch from specific library
-  const sheetName = libraryLocation === LIBRARY.HIGH_SCHOOL 
-    ? SHEETS.BOOKS_HS 
-    : SHEETS.BOOKS_MAIN
+  const sheetName = libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
   const cached = cache.get(`books_${libraryLocation}`)
   if (cached) return cached
   const rows = await readSheet(sheetName)
@@ -2977,7 +3277,7 @@ export function toBook(r) {
     id:            r[COL.BOOKS.ID],
     title:         r[COL.BOOKS.TITLE],
     author:        r[COL.BOOKS.AUTHOR],
-    isbn:          r[COL.BOOKS.ISBN],
+    year:          r[COL.BOOKS.YEAR],       // renamed from isbn
     category:      r[COL.BOOKS.CATEGORY],
     location:      r[COL.BOOKS.LOCATION],
     totalCopies:   parseInt(r[COL.BOOKS.TOTAL])     || 0,
@@ -2990,43 +3290,36 @@ export function toBook(r) {
 }
 
 const createSchema = Joi.object({
-  title:       Joi.string().max(255).required(),
-  author:      Joi.string().max(255).required(),
-  isbn:        Joi.string().max(20).optional().allow(''),
-  category:    Joi.string().max(100).required(),
-  location:    Joi.string().valid(...Object.values(LIBRARY)).required(),
-  totalCopies: Joi.number().integer().min(1).required(),
-  description: Joi.string().max(1000).optional().allow(''),
+  title:         Joi.string().max(255).required(),
+  author:        Joi.string().max(255).required(),
+  year:          Joi.string().max(10).optional().allow(''),  // renamed from isbn
+  category:      Joi.string().max(100).required(),
+  location:      Joi.string().valid(...Object.values(LIBRARY)).required(),
+  totalCopies:   Joi.number().integer().min(1).required(),
+  description:   Joi.string().max(1000).optional().allow(''),
   coverImageUrl: Joi.string().uri().optional().allow('')
 })
 
 async function handler(req, res) {
   if (req.method === 'GET') {
     let rows = await getBooks()
-    
-    // LIBRARY-BASED FILTERING FOR CLERKS
+
     if (req.user.role === ROLES.CLERK) {
       const assignedLibrary = req.user.assignedLibrary
-      if (!assignedLibrary) {
-        return res.status(403).json({ 
-          success: false, 
-          error: 'No library assigned to your account. Please contact admin.' 
-        })
-      }
+      if (!assignedLibrary)
+        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
       rows = rows.filter(r => r[COL.BOOKS.LOCATION] === assignedLibrary)
     }
-    // Admins and users see all books (no filter)
 
-    // Additional filters from query params
     const { location, category, search } = req.query
     if (location) rows = rows.filter(r => r[COL.BOOKS.LOCATION] === location.toUpperCase())
     if (category) rows = rows.filter(r => r[COL.BOOKS.CATEGORY]?.toLowerCase() === category.toLowerCase())
     if (search) {
       const q = search.toLowerCase()
       rows = rows.filter(r =>
-        r[COL.BOOKS.TITLE]?.toLowerCase().includes(q) ||
+        r[COL.BOOKS.TITLE]?.toLowerCase().includes(q)  ||
         r[COL.BOOKS.AUTHOR]?.toLowerCase().includes(q) ||
-        r[COL.BOOKS.ISBN]?.includes(q)
+        r[COL.BOOKS.YEAR]?.includes(q)                 // search by year too
       )
     }
     return res.json({ success: true, data: rows.map(toBook), total: rows.length })
@@ -3039,35 +3332,28 @@ async function handler(req, res) {
     const { error, value } = createSchema.validate(req.body)
     if (error) return res.status(400).json({ success: false, error: error.details[0].message })
 
-    // CLERKS CAN ONLY ADD BOOKS TO THEIR LIBRARY
     if (req.user.role === ROLES.CLERK) {
       const assignedLibrary = req.user.assignedLibrary
-      if (!assignedLibrary) {
-        return res.status(403).json({ 
-          success: false, 
-          error: 'No library assigned to your account. Please contact admin.' 
-        })
-      }
-      if (value.location !== assignedLibrary) {
-        return res.status(403).json({ 
-          success: false, 
-          error: `You can only add books to ${assignedLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}` 
-        })
-      }
+      if (!assignedLibrary)
+        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
+      if (value.location !== assignedLibrary)
+        return res.status(403).json({ success: false,
+          error: `You can only add books to ${assignedLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}` })
     }
 
-    const sheetName = value.location === LIBRARY.HIGH_SCHOOL 
-      ? SHEETS.BOOKS_HS 
-      : SHEETS.BOOKS_MAIN
-
+    const sheetName = value.location === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
     const id  = uuid()
     const now = new Date().toISOString()
+
     await appendRow(sheetName, [
-      id, value.title, value.author, value.isbn || '',
-      value.category, value.location, value.totalCopies, value.totalCopies,
-      value.description || '', value.coverImageUrl || '', now, req.user.id
+      id, value.title, value.author,
+      value.year || '',          // col 3 — was isbn, now year
+      value.category, value.location,
+      value.totalCopies, value.totalCopies,
+      value.description || '', value.coverImageUrl || '',
+      now, req.user.id
     ])
-    
+
     cache.del('books')
     cache.del(`books_${value.location}`)
     return res.status(201).json({ success: true, data: { id } })
@@ -3082,14 +3368,16 @@ export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
 
 <file path="pages/api/borrows/[id]/remind.js">
 import { v4 as uuid } from 'uuid'
-import { compose } from '../../../../lib/compose'
+import { compose }     from '../../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
-import { withAuth } from '../../../../middleware/withAuth'
-import { withRole } from '../../../../middleware/withRole'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { withRole }    from '../../../../middleware/withRole'
 import { rateLimiter } from '../../../../middleware/rateLimiter'
 import { trigger, ch } from '../../../../lib/pusher'
 import { readSheet, appendRow, batchRead } from '../../../../lib/sheets'
-import { SHEETS, COL, ROLES, NOTIF_TYPE } from '../../../../lib/constants'
+import {
+  SHEETS, COL, ROLES, NOTIF_TYPE, THREAD_STATUS, getBooksSheet
+} from '../../../../lib/constants'
 
 async function handlerRemind(req, res) {
   if (req.method !== 'POST')
@@ -3097,58 +3385,90 @@ async function handlerRemind(req, res) {
 
   const { id } = req.query
 
-  // Get borrow request
-  const [borrows, users, books] = await batchRead([
-    SHEETS.BORROWS,
-    SHEETS.USERS,
-    SHEETS.BOOKS
-  ])
-
-  const borrow = borrows.find(r => r[COL.BORROWS.ID] === id)
+  // Read borrows first to determine which books sheet to use
+  const borrowsRows = await readSheet(SHEETS.BORROWS)
+  const borrow = borrowsRows.find(r => r[COL.BORROWS.ID] === id)
   if (!borrow) httpError(404, 'Borrow request not found')
-
   if (borrow[COL.BORROWS.STATUS] !== 'APPROVED')
     httpError(400, 'Can only send reminders for approved borrows')
 
+  const borrowLocation = borrow[COL.BORROWS.LOCATION]
+  const booksSheetName = getBooksSheet(borrowLocation)   // FIX: use correct sheet
+
+  const [users, books] = await batchRead([SHEETS.USERS, booksSheetName])
+
   const user = users.find(u => u[COL.USERS.ID] === borrow[COL.BORROWS.USER_ID])
   const book = books.find(b => b[COL.BOOKS.ID] === borrow[COL.BORROWS.BOOK_ID])
-
   if (!user) httpError(404, 'User not found')
 
-  const dueDate = borrow[COL.BORROWS.DUE_DATE]
-  const now = new Date()
-  const due = new Date(dueDate)
+  const dueDate  = borrow[COL.BORROWS.DUE_DATE]
+  const now      = new Date()
+  const due      = new Date(dueDate)
   const daysOverdue = Math.floor((now - due) / (1000 * 60 * 60 * 24))
+  const timestamp   = new Date().toISOString()
 
-  // Create notification
-  const notifId = uuid()
-  const timestamp = new Date().toISOString()
-  
+  const bookTitle   = book?.[COL.BOOKS.TITLE] || `Assc. No. ${borrow[COL.BORROWS.BOOK_ID]}`
+  const formattedDue = new Date(dueDate).toLocaleDateString('en-PH', {
+    year: 'numeric', month: 'long', day: 'numeric'
+  })
+
+  // 1. In-app notification
   await appendRow(SHEETS.NOTIFICATIONS, [
-    notifId,
-    user[COL.USERS.ID],
+    uuid(), user[COL.USERS.ID],
     NOTIF_TYPE.BORROW_DUE,
-    'Book Return Reminder',
-    `Your borrowed book "${book?.[COL.BOOKS.TITLE] || borrow[COL.BORROWS.BOOK_ID]}" is ${daysOverdue} day(s) overdue. Please return it as soon as possible.`,
-    id,
-    'FALSE',
-    timestamp
+    '⚠️ Book Return Reminder',
+    `Your borrowed book "${bookTitle}" is ${daysOverdue} day(s) overdue (due: ${formattedDue}). Please return it as soon as possible.`,
+    id, 'FALSE', timestamp
   ])
 
-  // Send Pusher notification
+  // 2. Chat message from staff into the user's thread — allows the user to reply
+  const chatText = `📚 *Overdue Notice* — Hello! This is a reminder from ${req.user.name} that the book "${bookTitle}" was due on ${formattedDue} and is now ${daysOverdue} day(s) overdue. Please return it to the library at your earliest convenience. If you need an extension, you can reply here. Thank you!`
+  const chatId   = uuid()
+
+  await appendRow(SHEETS.CHAT, [
+    chatId,
+    user[COL.USERS.ID],   // threadId = borrower's userId
+    req.user.id,           // senderId = staff member
+    req.user.role,         // senderRole
+    'INQUIRY',
+    chatText,
+    timestamp,
+    'FALSE',
+    THREAD_STATUS.OPEN,
+    borrowLocation
+  ])
+
+  // 3. Pusher: update borrower's notification badge
   await trigger(ch.userNotif(user[COL.USERS.ID]), 'overdue-reminder', {
-    title: 'Book Return Reminder',
-    message: `Your book is ${daysOverdue} days overdue`,
+    title:    '⚠️ Book Return Reminder',
+    message:  `Your book is ${daysOverdue} day(s) overdue`,
     borrowId: id
+  })
+
+  // 4. Pusher: push chat message to borrower's chat channel (live update)
+  await trigger(ch.chat(user[COL.USERS.ID]), 'new-message', {
+    id:          chatId,
+    threadId:    user[COL.USERS.ID],
+    senderId:    req.user.id,
+    senderName:  req.user.name,
+    senderRole:  req.user.role,
+    messageText: chatText,
+    timestamp,
+    libraryLocation: borrowLocation
+  })
+
+  // 5. Pusher: refresh thread list in admin chat console
+  await trigger(ch.adminInbox(borrowLocation), 'new-chat-message', {
+    threadId: user[COL.USERS.ID],
+    userName: user[COL.USERS.NAME],
+    preview:  chatText.substring(0, 80),
+    library:  borrowLocation
   })
 
   res.json({
     success: true,
     message: 'Reminder sent successfully',
-    data: {
-      sentTo: user[COL.USERS.EMAIL],
-      daysOverdue
-    }
+    data:    { sentTo: user[COL.USERS.EMAIL], daysOverdue, chatSent: true }
   })
 }
 
@@ -3773,6 +4093,22 @@ async function handlerMe(req, res) {
 }
 
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
+</file>
+
+<file path="pages/api/hello.ts">
+// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
+import type { NextApiRequest, NextApiResponse } from "next";
+
+type Data = {
+  name: string;
+};
+
+export default function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<Data>,
+) {
+  res.status(200).json({ name: "John Doe" });
+}
 </file>
 
 <file path="pages/api/notifications/[id]/read.js">
@@ -4852,6 +5188,8 @@ import MessageBubble    from '../components/chat/MessageBubble'
 import Spinner          from '../components/ui/Spinner'
 import Toast            from '../components/ui/Toast'
 import { useChat }      from '../hooks/useChat'
+import { useNotifications } from '../hooks/useNotifications'
+import api              from '../lib/api'
 
 const MSG_TYPES = [
   { id: 'INQUIRY',   label: '🔍 Inquiry',   desc: 'Ask about books or services' },
@@ -4860,126 +5198,132 @@ const MSG_TYPES = [
 ]
 
 const LIBRARIES = [
-  { id: 'HIGH_SCHOOL',   label: '🏫 High School Library', desc: 'For HS students and faculty' },
-  { id: 'MAIN_LIBRARY',  label: '📚 Main Library',       desc: 'For college departments' }
+  { id: 'HIGH_SCHOOL',  label: '🏫 High School Library', desc: 'For HS students and faculty' },
+  { id: 'MAIN_LIBRARY', label: '📚 Main Library',        desc: 'For college departments' }
 ]
 
 export default function ChatPage() {
-  const router = useRouter()
-  const { data: session }       = useSession()
+  const router  = useRouter()
+  const { data: session }  = useSession()
   const { messages, loading, sendMessage } = useChat()
-  const [msgType, setMsgType]   = useState(null)
-  const [library, setLibrary]   = useState(null)
-  const [toast, setToast]       = useState(null)
-  const [text, setText]         = useState('')
-  const bottomRef               = useRef(null)
-  const textareaRef             = useRef(null)
-  
-  // 🔥 TRIPLE LOCK SYSTEM
-  const submitLockRef           = useRef(false)  // Prevents concurrent sends
-  const lastSubmitTimeRef       = useRef(0)      // Debounce timer
-  const [isSending, setIsSending] = useState(false)  // UI state
-  
-  const userId                  = session?.user?.id
+  const { notifications, markRead }        = useNotifications()
 
+  const [msgType,    setMsgType]    = useState(null)
+  const [library,    setLibrary]    = useState(null)
+  const [toast,      setToast]      = useState(null)
+  const [text,       setText]       = useState('')
+  const bottomRef                   = useRef(null)
+  const textareaRef                 = useRef(null)
+  const submitLockRef               = useRef(false)
+  const lastSubmitRef               = useRef(0)
+  const [isSending,  setIsSending]  = useState(false)
+  const userId = session?.user?.id
+
+  // Auto-scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // AUTO-CLEAR chat-reply notifications when user opens this page
+  useEffect(() => {
+    if (!notifications.length) return
+    notifications
+      .filter(n => !n.isRead && n.type === 'CHAT_REPLY')
+      .forEach(n => markRead(n.id))
+  // Run once on mount + whenever new notifications arrive
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifications.length])
 
   const hasMessages = messages.length > 0
   const isResolved  = hasMessages && messages[messages.length - 1]?.threadStatus === 'RESOLVED'
 
   async function handleSend() {
     const trimmedText = text.trim()
-    
-    // 🔥 CRITICAL: Multi-layer validation
     if (!trimmedText) return
-    if (submitLockRef.current) {
-      console.log('🔒 Send locked - already in progress')
-      return
-    }
-    if (isSending) {
-      console.log('🔒 Send locked - UI state sending')
-      return
-    }
-    if (isResolved) return
-    
-    // 🔥 DEBOUNCE: Prevent sends within 1 second
+    if (submitLockRef.current || isSending || isResolved) return
     const now = Date.now()
-    if (now - lastSubmitTimeRef.current < 1000) {
-      console.log('🔒 Send locked - debounce (too fast)')
-      return
-    }
-    
-    // Check if first message and missing required fields
+    if (now - lastSubmitRef.current < 1000) return
     if (!hasMessages && (!msgType || !library)) {
       setToast({ message: 'Please select library and message type', type: 'error' })
       return
     }
 
-    // 🔥 LOCK EVERYTHING IMMEDIATELY
     submitLockRef.current = true
     setIsSending(true)
-    lastSubmitTimeRef.current = now
-    
-    // Clear input immediately to prevent re-submission
-    const messageToSend = trimmedText
+    lastSubmitRef.current = now
+    const msg = trimmedText
     setText('')
 
     try {
-      await sendMessage(messageToSend, !hasMessages ? msgType : undefined, library)
+      await sendMessage(msg, !hasMessages ? msgType : undefined, library)
     } catch (err) {
-      // Only restore text if send actually failed (not a lock error)
-      if (!err.message?.includes('Already sending')) {
-        setText(messageToSend)
-        setToast({ message: err.message || 'Failed to send message.', type: 'error' })
+      if (!err.message?.includes('progress')) {
+        setText(msg)
+        setToast({ message: err.message || 'Failed to send.', type: 'error' })
       }
     } finally {
-      // 🔥 UNLOCK AFTER DELAY
-      setTimeout(() => {
-        submitLockRef.current = false
-        setIsSending(false)
-      }, 1500) // 1.5 second lock
+      setTimeout(() => { submitLockRef.current = false; setIsSending(false) }, 1500)
       textareaRef.current?.focus()
+    }
+  }
+
+  // NEW CONVERSATION — posts first message to a fresh thread
+  // Achieved by calling sendMessage with fresh msgType + library (user selects again)
+  const [showNewConv, setShowNewConv] = useState(false)
+  const [newMsgType,  setNewMsgType]  = useState(null)
+  const [newLibrary,  setNewLibrary]  = useState(null)
+  const [newText,     setNewText]     = useState('')
+  const [startingNew, setStartingNew] = useState(false)
+
+  async function handleStartNew() {
+    if (!newText.trim() || !newMsgType || !newLibrary) {
+      setToast({ message: 'Please fill in all fields', type: 'error' })
+      return
+    }
+    setStartingNew(true)
+    try {
+      // Re-open the thread by sending a new message with type + library
+      await api.post('/chat/messages', {
+        threadId:    userId,
+        messageText: newText.trim(),
+        messageType: newMsgType,
+        library:     newLibrary
+      })
+      setShowNewConv(false)
+      setNewText('')
+      setNewMsgType(null)
+      setNewLibrary(null)
+      // SWR will revalidate and show the new message
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to start conversation.', type: 'error' })
+    } finally {
+      setStartingNew(false)
     }
   }
 
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      e.stopPropagation() // Stop event bubbling
-      
-      // Only call handleSend if not locked
-      if (!submitLockRef.current && !isSending) {
-        handleSend()
-      }
+      e.stopPropagation()
+      if (!submitLockRef.current && !isSending) handleSend()
     }
   }
 
-  // 🔥 PREVENT ANY FORM SUBMISSION
-  function handleFormSubmit(e) {
-    e.preventDefault()
-    e.stopPropagation()
-    return false
-  }
-
-  const canSend = text.trim() && !submitLockRef.current && !isSending && !isResolved && 
+  const canSend = text.trim() && !submitLockRef.current && !isSending && !isResolved &&
     (hasMessages || (msgType && library))
 
   return (
     <div className="min-h-screen bg-green-50 flex flex-col safe-top">
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
 
-      {/* Top bar with BACK BUTTON */}
+      {/* Top bar */}
       <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30">
         <button onClick={() => router.back()}
           className="p-1 rounded-full hover:bg-green-700 transition">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5}
-            viewBox="0 0 24 24">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
           </svg>
         </button>
-
         <div className="w-9 h-9 rounded-full bg-green-600 flex items-center justify-center">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round"
@@ -4989,29 +5333,24 @@ export default function ChatPage() {
         <div>
           <p className="font-semibold text-sm">Library Support</p>
           <p className="text-green-300 text-xs">
-            {isResolved ? '✓ Resolved' : hasMessages ? '🟢 Active conversation' : 'Start a conversation'}
+            {isResolved ? '✔ Resolved' : hasMessages ? '🟢 Active conversation' : 'Start a conversation'}
           </p>
         </div>
       </header>
 
-      {/* Library & Message type selector */}
+      {/* First-message selector */}
       {!hasMessages && !loading && (
         <div className="px-4 pt-4 max-w-lg mx-auto w-full">
-          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">
-            Select library
-          </p>
+          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">Select library</p>
           <div className="grid grid-cols-2 gap-2 mb-4">
             {LIBRARIES.map(lib => (
-              <button key={lib.id} onClick={() => setLibrary(lib.id)}
-                disabled={isSending}
+              <button key={lib.id} onClick={() => setLibrary(lib.id)} disabled={isSending}
                 className={`p-3 rounded-xl border-2 text-left transition
-                  ${library === lib.id
-                    ? 'border-green-600 bg-green-50'
-                    : 'border-gray-200 bg-white hover:border-green-300'}
+                  ${library === lib.id ? 'border-green-600 bg-green-50' : 'border-gray-200 bg-white hover:border-green-300'}
                   ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}>
                 <div className="flex items-center gap-2">
                   <span className="text-lg">{lib.label.split(' ')[0]}</span>
-                  <div className="flex-1">
+                  <div>
                     <p className={`text-xs font-semibold ${library === lib.id ? 'text-green-700' : 'text-gray-700'}`}>
                       {lib.label.split(' ').slice(1).join(' ')}
                     </p>
@@ -5022,17 +5361,12 @@ export default function ChatPage() {
             ))}
           </div>
 
-          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">
-            Message type
-          </p>
+          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">Message type</p>
           <div className="grid grid-cols-3 gap-2 mb-4">
             {MSG_TYPES.map(t => (
-              <button key={t.id} onClick={() => setMsgType(t.id)}
-                disabled={isSending}
+              <button key={t.id} onClick={() => setMsgType(t.id)} disabled={isSending}
                 className={`p-2.5 rounded-xl border-2 text-center transition
-                  ${msgType === t.id
-                    ? 'border-green-600 bg-green-50'
-                    : 'border-gray-200 bg-white hover:border-green-300'}
+                  ${msgType === t.id ? 'border-green-600 bg-green-50' : 'border-gray-200 bg-white hover:border-green-300'}
                   ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}>
                 <span className="text-base block">{t.label.split(' ')[0]}</span>
                 <span className={`text-[10px] font-semibold block mt-0.5
@@ -5050,70 +5384,131 @@ export default function ChatPage() {
         </div>
       )}
 
-      {/* Messages area */}
+      {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 pt-4 pb-4 max-w-lg mx-auto w-full chat-scroll">
-        {loading
-          ? <Spinner/>
-          : !hasMessages
-            ? <div className="flex flex-col items-center justify-center h-48 text-center">
-                <span className="text-4xl mb-3">💬</span>
-                <p className="text-green-800 font-semibold text-sm">No messages yet</p>
-                <p className="text-gray-400 text-xs mt-1">Send your first message to get started.</p>
+        {loading ? <Spinner/> : !hasMessages
+          ? (
+            <div className="flex flex-col items-center justify-center h-48 text-center">
+              <span className="text-4xl mb-3">💬</span>
+              <p className="text-green-800 font-semibold text-sm">No messages yet</p>
+              <p className="text-gray-400 text-xs mt-1">Send your first message to get started.</p>
+            </div>
+          ) : (
+            <>
+              <div className="bg-green-100 rounded-xl px-3 py-2 mb-4 text-center">
+                <p className="text-xs text-green-700">
+                  💡 Library staff will reply as soon as possible.
+                </p>
               </div>
-            : <>
-                <div className="bg-green-100 rounded-xl px-3 py-2 mb-4 text-center">
-                  <p className="text-xs text-green-700">
-                    💡 Library staff will reply as soon as possible. Please be patient.
-                  </p>
+              {messages.map(msg => (
+                <MessageBubble key={msg.id} msg={msg} isOwn={msg.senderId === userId}/>
+              ))}
+              {isResolved && (
+                <div className="text-center my-4 space-y-3">
+                  <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full inline-block">
+                    ✔ This conversation has been resolved
+                  </span>
+                  {/* NEW CONVERSATION BUTTON */}
+                  {!showNewConv && (
+                    <div>
+                      <button
+                        onClick={() => setShowNewConv(true)}
+                        className="bg-green-700 hover:bg-green-800 text-white text-xs
+                          font-semibold px-4 py-2 rounded-xl transition">
+                        + Start New Conversation
+                      </button>
+                    </div>
+                  )}
                 </div>
-                {messages.map(msg => (
-                  <MessageBubble key={msg.id} msg={msg} isOwn={msg.senderId === userId}/>
-                ))}
-                {isResolved && (
-                  <div className="text-center my-4">
-                    <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full">
-                      ✓ This conversation has been resolved
-                    </span>
+              )}
+
+              {/* New conversation form (shown after clicking the button) */}
+              {isResolved && showNewConv && (
+                <div className="bg-white rounded-2xl border border-green-200 p-4 mt-2 space-y-3">
+                  <p className="text-xs font-bold text-green-800 uppercase tracking-wide">
+                    New Conversation
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {LIBRARIES.map(lib => (
+                      <button key={lib.id} onClick={() => setNewLibrary(lib.id)}
+                        className={`p-2 rounded-xl border-2 text-xs font-semibold transition
+                          ${newLibrary === lib.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                        {lib.label}
+                      </button>
+                    ))}
                   </div>
-                )}
-                <div ref={bottomRef}/>
-              </>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    {MSG_TYPES.map(t => (
+                      <button key={t.id} onClick={() => setNewMsgType(t.id)}
+                        className={`p-2 rounded-xl border-2 text-xs font-semibold transition
+                          ${newMsgType === t.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                        {t.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <textarea
+                    value={newText}
+                    onChange={e => setNewText(e.target.value)}
+                    rows={3}
+                    placeholder="Type your message…"
+                    className="w-full border border-green-200 rounded-xl px-3 py-2 text-sm
+                      focus:outline-none focus:ring-2 focus:ring-green-500 resize-none bg-green-50"
+                  />
+
+                  <div className="flex gap-2">
+                    <button onClick={() => { setShowNewConv(false); setNewText('') }}
+                      className="flex-1 border-2 border-gray-200 text-gray-600 text-xs
+                        font-semibold py-2 rounded-xl hover:bg-gray-50 transition">
+                      Cancel
+                    </button>
+                    <button onClick={handleStartNew} disabled={startingNew || !newText.trim() || !newMsgType || !newLibrary}
+                      className="flex-1 bg-green-700 text-white text-xs font-semibold py-2
+                        rounded-xl hover:bg-green-800 transition disabled:opacity-50">
+                      {startingNew ? 'Sending…' : '✔ Send'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div ref={bottomRef}/>
+            </>
+          )
         }
       </div>
 
-      {/* Input - 🔥 WRAPPED IN FORM TO PREVENT DEFAULT SUBMISSION */}
+      {/* Input bar — hidden when resolved */}
       {!isResolved && (
-        <form onSubmit={handleFormSubmit} className="sticky bottom-0 w-full max-w-lg mx-auto bg-white border-t border-green-100 px-4 py-3">
+        <form onSubmit={e => { e.preventDefault(); e.stopPropagation() }}
+          className="sticky bottom-0 w-full max-w-lg mx-auto bg-white border-t border-green-100 px-4 py-3">
           <div className="flex gap-2 items-end">
-            <textarea 
+            <textarea
               ref={textareaRef}
               value={text}
               onChange={e => setText(e.target.value)}
               onKeyDown={handleKeyDown}
               rows={1}
-              disabled={submitLockRef.current || isSending}
-              placeholder={hasMessages ? "Type a message…" : "Select library and type above first"}
+              disabled={isSending}
+              placeholder={hasMessages ? 'Type a message…' : 'Select library and type above first'}
               className="flex-1 resize-none border border-green-200 rounded-xl px-3 py-2 text-sm
-                focus:outline-none focus:ring-2 focus:ring-green-500 max-h-28 bg-green-50 
+                focus:outline-none focus:ring-2 focus:ring-green-500 max-h-28 bg-green-50
                 placeholder-gray-400 disabled:opacity-50 disabled:cursor-not-allowed"
               style={{ overflowY: text.split('\n').length > 3 ? 'auto' : 'hidden' }}
             />
-            <button
-              onClick={handleSend}
-              disabled={!canSend}
-              type="button"
-              className="w-10 h-10 rounded-xl bg-green-700 text-white flex items-center justify-center
-                disabled:opacity-40 hover:bg-green-800 transition flex-shrink-0">
-              {(submitLockRef.current || isSending) ? (
-                <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
-                  <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
-                </svg>
-              ) : (
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
-                </svg>
-              )}
+            <button onClick={handleSend} disabled={!canSend} type="button"
+              className="w-10 h-10 rounded-xl bg-green-700 text-white flex items-center
+                justify-center disabled:opacity-40 hover:bg-green-800 transition flex-shrink-0">
+              {isSending
+                ? <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
+                    <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
+                  </svg>
+                : <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                  </svg>
+              }
             </button>
           </div>
         </form>
@@ -5287,40 +5682,40 @@ export default function ForbiddenPage() {
 <file path="pages/dashboard/borrows.jsx">
 import { useState } from 'react'
 import DashboardLayout from '../../components/layout/DashboardLayout'
-import BorrowFilters from '../../components/borrows/BorrowFilters'
-import BorrowsTable from '../../components/borrows/BorrowsTable'
-import OverduePanel from '../../components/borrows/OverduePanel' // NEW
-import ApproveModal from '../../components/borrows/ApproveModal'
-import RejectModal from '../../components/borrows/RejectModal'
-import Modal from '../../components/ui/Modal'
-import Spinner from '../../components/ui/Spinner'
-import EmptyState from '../../components/ui/EmptyState'
-import Toast from '../../components/ui/Toast'
+import BorrowFilters   from '../../components/borrows/BorrowFilters'
+import BorrowsTable    from '../../components/borrows/BorrowsTable'
+import OverduePanel    from '../../components/borrows/OverduePanel'
+import ApproveModal    from '../../components/borrows/ApproveModal'
+import RejectModal     from '../../components/borrows/RejectModal'
+import Modal           from '../../components/ui/Modal'
+import Spinner         from '../../components/ui/Spinner'
+import EmptyState      from '../../components/ui/EmptyState'
+import Toast           from '../../components/ui/Toast'
 import { useDashboardBorrows } from '../../hooks/useDashboardBorrows'
-import { useDashboardUsers } from '../../hooks/useDashboardUsers'
-import { withDashboardAuth } from '../../components/guards/withDashboardAuth'
+import { useDashboardUsers }   from '../../hooks/useDashboardUsers'
+import { withDashboardAuth }   from '../../components/guards/withDashboardAuth'
 import useSWR from 'swr'
-import api from '../../lib/api'
+import api    from '../../lib/api'
 
 export default function BorrowsPage() {
   const { borrows, loading, approveBorrow, rejectBorrow, returnBorrow } = useDashboardBorrows()
-  const { users } = useDashboardUsers()
+  const { users }  = useDashboardUsers()
   const { data: books = [] } = useSWR('/books', url => api.get(url).then(d => d.data))
 
-  const [filters, setFilters] = useState({ status: 'ALL', library: 'ALL', search: '' })
-  const [approveTarget, setApprove] = useState(null)
-  const [rejectTarget, setReject] = useState(null)
-  const [returnTarget, setReturn] = useState(null)
-  const [actionLoading, setActLoad] = useState(false)
-  const [toast, setToast] = useState(null)
-  const [showOverdue, setShowOverdue] = useState(false) // NEW
+  const [filters,       setFilters]  = useState({ status: 'ALL', library: 'ALL', search: '' })
+  const [approveTarget, setApprove]  = useState(null)
+  const [rejectTarget,  setReject]   = useState(null)
+  const [returnTarget,  setReturn]   = useState(null)
+  const [actionLoading, setActLoad]  = useState(false)
+  const [toast,         setToast]    = useState(null)
+  const [showOverdue,   setOverdue]  = useState(false)
 
-  function showToast(message, type = 'success') { setToast({ message, type }) }
+  function showToast(msg, type = 'success') { setToast({ message: msg, type }) }
   function patchFilter(patch) { setFilters(prev => ({ ...prev, ...patch })) }
 
   // Client-side filter
   let filtered = [...borrows]
-  if (filters.status !== 'ALL') filtered = filtered.filter(b => b.status === filters.status)
+  if (filters.status  !== 'ALL') filtered = filtered.filter(b => b.status   === filters.status)
   if (filters.library !== 'ALL') filtered = filtered.filter(b => b.location === filters.library)
   if (filters.search) {
     const q = filters.search.toLowerCase()
@@ -5330,17 +5725,28 @@ export default function BorrowsPage() {
   }
   filtered.sort((a, b) => new Date(b.requestDate) - new Date(a.requestDate))
 
-  // NEW: Send overdue reminder
+  // Count overdue for badge
+  const overdueCount = borrows.filter(b => {
+    if (b.status !== 'APPROVED' || !b.dueDate) return false
+    return Date.now() > new Date(b.dueDate).getTime()
+  }).length
+
   async function handleSendReminder(borrowId) {
     setActLoad(true)
     try {
       await api.post(`/borrows/${borrowId}/remind`)
-      showToast('Reminder sent successfully!')
-    } catch (e) {
-      showToast(e.message, 'error')
-    } finally {
-      setActLoad(false)
-    }
+      showToast('Reminder sent and posted to borrower chat!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleExtend(borrowId, dueDate) {
+    setActLoad(true)
+    try {
+      await api.patch(`/borrows/${borrowId}/extend`, { dueDate })
+      showToast('Due date extended successfully!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
   }
 
   async function handleApprove(id, dueDate) {
@@ -5350,7 +5756,7 @@ export default function BorrowsPage() {
       setApprove(null)
       showToast('Request approved successfully!')
     } catch (e) { showToast(e.message, 'error') }
-    finally { setActLoad(false) }
+    finally     { setActLoad(false) }
   }
 
   async function handleReject(id, notes) {
@@ -5360,7 +5766,7 @@ export default function BorrowsPage() {
       setReject(null)
       showToast('Request rejected.')
     } catch (e) { showToast(e.message, 'error') }
-    finally { setActLoad(false) }
+    finally     { setActLoad(false) }
   }
 
   async function handleReturn(id) {
@@ -5370,85 +5776,70 @@ export default function BorrowsPage() {
       setReturn(null)
       showToast('Book marked as returned!')
     } catch (e) { showToast(e.message, 'error') }
-    finally { setActLoad(false) }
+    finally     { setActLoad(false) }
   }
 
   return (
     <DashboardLayout title="Borrow Management">
-      {toast && <Toast {...toast} onClose={() => setToast(null)} />}
+      {toast && <Toast {...toast} onClose={() => setToast(null)}/>}
 
-      {/* NEW: Overdue section toggle */}
+      {/* View toggle */}
       <div className="flex gap-3 mb-5">
-        <button
-          onClick={() => setShowOverdue(false)}
-          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition ${
-            !showOverdue
+        <button onClick={() => setOverdue(false)}
+          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${!showOverdue
               ? 'bg-green-700 text-white'
-              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'
-          }`}>
+              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'}`}>
           📋 All Requests
         </button>
-        <button
-          onClick={() => setShowOverdue(true)}
-          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition ${
-            showOverdue
+        <button onClick={() => setOverdue(true)}
+          className={`relative flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${showOverdue
               ? 'bg-red-600 text-white'
-              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'
-          }`}>
+              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'}`}>
           ⚠️ Overdue Books
+          {overdueCount > 0 && (
+            <span className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-[10px] font-bold
+              flex items-center justify-center
+              ${showOverdue ? 'bg-white text-red-600' : 'bg-red-500 text-white'}`}>
+              {overdueCount > 9 ? '9+' : overdueCount}
+            </span>
+          )}
         </button>
       </div>
 
       {showOverdue ? (
-        loading ? (
-          <Spinner />
-        ) : (
+        loading ? <Spinner/> : (
           <OverduePanel
             borrows={borrows}
             users={users}
             books={books}
             onSendReminder={handleSendReminder}
+            onExtend={handleExtend}
           />
         )
       ) : (
         <>
-          <BorrowFilters {...filters} onChange={patchFilter} />
-
-          {loading ? (
-            <Spinner />
-          ) : filtered.length === 0 ? (
-            <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters." />
-          ) : (
-            <BorrowsTable
-              borrows={filtered}
-              users={users}
-              books={books}
-              onApprove={b => setApprove(b)}
-              onReject={b => setReject(b)}
-              onReturn={b => setReturn(b)}
-            />
-          )}
+          <BorrowFilters {...filters} onChange={patchFilter}/>
+          {loading ? <Spinner/> : filtered.length === 0
+            ? <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters."/>
+            : <BorrowsTable
+                borrows={filtered} users={users} books={books}
+                onApprove={b => setApprove(b)}
+                onReject={b  => setReject(b)}
+                onReturn={b  => setReturn(b)}
+              />
+          }
         </>
       )}
 
-      <ApproveModal
-        open={!!approveTarget}
-        borrow={approveTarget}
-        loading={actionLoading}
-        onConfirm={handleApprove}
-        onClose={() => setApprove(null)}
-      />
+      <ApproveModal open={!!approveTarget} borrow={approveTarget}
+        loading={actionLoading} onConfirm={handleApprove} onClose={() => setApprove(null)}/>
 
-      <RejectModal
-        open={!!rejectTarget}
-        borrow={rejectTarget}
-        loading={actionLoading}
-        onConfirm={handleReject}
-        onClose={() => setReject(null)}
-      />
+      <RejectModal open={!!rejectTarget} borrow={rejectTarget}
+        loading={actionLoading} onConfirm={handleReject} onClose={() => setReject(null)}/>
 
-      {/* Return confirmation modal */}
-      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✓ Confirm Return">
+      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✔ Confirm Return">
         <div className="space-y-4">
           <p className="text-sm text-gray-600">
             Mark borrow request{' '}
@@ -5456,17 +5847,15 @@ export default function BorrowsPage() {
             returned? This will restore the book's available copy count.
           </p>
           <div className="flex gap-3 pt-2">
-            <button
-              onClick={() => setReturn(null)}
-              disabled={actionLoading}
-              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold py-2.5 rounded-xl hover:bg-gray-50 transition">
+            <button onClick={() => setReturn(null)} disabled={actionLoading}
+              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
+                py-2.5 rounded-xl hover:bg-gray-50 transition">
               Cancel
             </button>
-            <button
-              onClick={() => handleReturn(returnTarget.id)}
-              disabled={actionLoading}
-              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl hover:bg-blue-700 transition disabled:opacity-50">
-              {actionLoading ? 'Confirming…' : '✓ Confirm Return'}
+            <button onClick={() => handleReturn(returnTarget.id)} disabled={actionLoading}
+              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
+                hover:bg-blue-700 transition disabled:opacity-50">
+              {actionLoading ? 'Confirming…' : '✔ Confirm Return'}
             </button>
           </div>
         </div>
@@ -6013,190 +6402,6 @@ export default function Index() {
   }, [session, status])
 
   return <div className="min-h-screen bg-green-50 flex items-center justify-center"><Spinner/></div>
-}
-</file>
-
-<file path="pages/profile.jsx">
-import { signOut, useSession } from 'next-auth/react'
-import { useState }            from 'react'
-import AppLayout               from '../components/layout/AppLayout'
-import Avatar                  from '../components/ui/Avatar'
-import StatusBadge             from '../components/ui/StatusBadge'
-import Spinner                 from '../components/ui/Spinner'
-import { useNotifications }    from '../hooks/useNotifications'
-import { useBorrows }          from '../hooks/useBorrows'
-import { fmtDate, fmtTime }   from '../lib/utils'
-
-export default function ProfilePage() {
-  const { data: session }                   = useSession()
-  const [showAllNotifs, setShowAllNotifs]   = useState(false)
-  const [signingOut, setSigningOut]         = useState(false)
-  const { notifications, markRead, loading: nLoading } = useNotifications()
-  const { borrows }                         = useBorrows()
-
-  if (!session) return null
-  const user = session.user
-
-  const stats = {
-    total:    borrows.length,
-    active:   borrows.filter(b => b.status === 'APPROVED').length,
-    returned: borrows.filter(b => b.status === 'RETURNED').length,
-    pending:  borrows.filter(b => b.status === 'PENDING').length
-  }
-
-  const visibleNotifs = showAllNotifs ? notifications : notifications.slice(0, 5)
-
-  async function handleSignOut() {
-    setSigningOut(true)
-    await signOut({ callbackUrl: '/auth/signin' })
-  }
-
-  const STAT_ITEMS = [
-    { label: 'Total',    value: stats.total,    color: 'text-green-700' },
-    { label: 'Active',   value: stats.active,   color: 'text-blue-600' },
-    { label: 'Returned', value: stats.returned, color: 'text-gray-600' },
-    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600' }
-  ]
-
-  return (
-    <AppLayout title="My Profile">
-      {/* Profile card */}
-      <div className="bg-green-700 rounded-3xl p-5 mb-5 shadow-card">
-        <div className="flex items-center gap-4">
-          <Avatar name={user.name} image={user.image} size={16}/>
-          <div className="flex-1 min-w-0">
-            <p className="text-white font-bold text-base truncate">{user.name}</p>
-            <p className="text-green-200 text-xs truncate">{user.email}</p>
-            <div className="flex gap-2 mt-2 flex-wrap">
-              <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium capitalize">
-                {user.role}
-              </span>
-              {user.dept && (
-                <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium">
-                  {user.dept}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-4 gap-2 mb-5">
-        {STAT_ITEMS.map(s => (
-          <div key={s.label} className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
-            <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
-            <p className="text-[10px] text-gray-400 mt-0.5 font-medium">{s.label}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Account info */}
-      <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
-        <div className="px-4 py-3 border-b border-green-50">
-          <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Account Information</p>
-        </div>
-        {[
-          { label: 'Full Name',   value: user.name },
-          { label: 'Email',       value: user.email },
-          { label: 'Role',        value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
-          { label: 'Department',  value: user.dept || '—' },
-          { label: 'Status',      value: <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">Active</span> }
-        ].map(row => (
-          <div key={row.label} className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
-            <span className="text-xs text-gray-500 font-medium">{row.label}</span>
-            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">{row.value}</span>
-          </div>
-        ))}
-      </div>
-              // In the account info section, add these rows:
-
-        {user.userType === 'student' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Student ID</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.studentId}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Year & Section</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.year} - {user.section}</span>
-            </div>
-          </>
-        )}
-
-        {user.userType === 'employee' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Employee No.</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.employeeNum}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Position</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.position}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Office</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.office}</span>
-            </div>
-          </>
-        )}
-
-      {/* Notifications */}
-      <div className="mb-5">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-sm font-bold text-green-800">Notifications</p>
-          <span className="text-xs text-gray-400">{notifications.filter(n => !n.isRead).length} unread</span>
-        </div>
-        {nLoading
-          ? <Spinner className="w-6 h-6"/>
-          : notifications.length === 0
-            ? <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
-                <p className="text-2xl mb-1">🔔</p>
-                <p className="text-xs text-gray-400">No notifications yet.</p>
-              </div>
-            : <>
-                <div className="space-y-2">
-                  {visibleNotifs.map(n => (
-                    <div key={n.id} onClick={() => !n.isRead && markRead(n.id)}
-                      className={`bg-white rounded-xl border shadow-card p-3 transition cursor-pointer
-                        ${n.isRead ? 'border-green-50 opacity-70' : 'border-green-200 hover:bg-green-50'}`}>
-                      <div className="flex gap-2">
-                        {!n.isRead && <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-gray-800">{n.title}</p>
-                          <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.message}</p>
-                          <p className="text-[10px] text-gray-300 mt-1">{fmtTime(n.createdAt)}</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {notifications.length > 5 && (
-                  <button onClick={() => setShowAllNotifs(!showAllNotifs)}
-                    className="mt-2 w-full text-center text-xs text-green-600 font-semibold py-2">
-                    {showAllNotifs ? '▲ Show less' : `▼ Show all ${notifications.length} notifications`}
-                  </button>
-                )}
-              </>
-        }
-      </div>
-
-      {/* Sign out */}
-      <button onClick={handleSignOut} disabled={signingOut}
-        className="w-full border-2 border-red-200 text-red-500 font-semibold py-3.5 rounded-2xl
-          hover:bg-red-50 transition disabled:opacity-50 mb-8">
-        {signingOut ? 'Signing out…' : '↩ Sign Out'}
-      </button>
-    </AppLayout>
-  )
-}
-
-export async function getServerSideProps(ctx) {
-  const { getServerSession } = await import('next-auth/next')
-  const { authOptions }      = await import('./api/auth/[...nextauth]')
-  const session = await getServerSession(ctx.req, ctx.res, authOptions)
-  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
-  return { props: {} }
 }
 </file>
 
@@ -7530,149 +7735,6 @@ module.exports = {
 </html>
 </file>
 
-<file path="tailwind.config.js">
-module.exports = {
-  content: ['./pages/**/*.{js,jsx}', './components/**/*.{js,jsx}'],
-  theme: {
-    extend: {
-      colors: {
-        green: {
-          50:  '#F1F8E9', 100: '#DCEDC8', 200: '#C8E6C9',
-          300: '#A5D6A7', 400: '#81C784', 500: '#66BB6A',
-          600: '#43A047', 700: '#2E7D32', 800: '#1B5E20',
-          900: '#154318'
-        }
-      },
-      fontFamily: { sans: ['Inter', 'Segoe UI', 'sans-serif'] },
-      boxShadow: {
-        card: '0 2px 12px rgba(27,94,32,0.08)',
-        nav:  '0 -2px 16px rgba(27,94,32,0.12)'
-      }
-    }
-  },
-  plugins: []
-}
-</file>
-
-<file path=".gitignore">
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/.pnp
-.pnp.js
-.yarn/install-state.gz
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# local env files
-.env*.local
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# Google service account key
-mvgfc-e-library-3a319dd2877f.json
-
-.env.local
-.env*.local
-
-node_modules/
-.next/
-.env.local
-.env*.local
-*.log
-.DS_Store
-</file>
-
-<file path="next.config.mjs">
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  reactStrictMode: true,
-};
-
-export default nextConfig;
-</file>
-
-<file path="package.json">
-{
-  "name": "mvgfc-elibrary",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start -p $PORT",
-    "lint": "next lint"
-  },
-  "dependencies": {
-    "@tailwindcss/postcss": "^4.2.1",
-    "axios": "^1.13.6",
-    "bcryptjs": "^3.0.3",
-    "googleapis": "^171.4.0",
-    "joi": "^18.0.2",
-    "jspdf": "^4.2.1",
-    "next": "14.2.35",
-    "next-auth": "^4.24.13",
-    "next-pwa": "^5.6.0",
-    "pusher": "^5.3.2",
-    "pusher-js": "^8.4.0",
-    "react": "^18",
-    "react-dom": "^18",
-    "swr": "^2.4.1",
-    "uuid": "^13.0.0"
-  },
-  "devDependencies": {
-    "@types/node": "^20",
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "autoprefixer": "^10.4.27",
-    "eslint": "^9.39.3",
-    "eslint-config-next": "^16.1.6",
-    "postcss": "^8.5.8",
-    "tailwindcss": "^3.4.19",
-    "typescript": "^5"
-  }
-}
-</file>
-
-<file path="pages/api/hello.ts">
-// Next.js API route support: https://nextjs.org/docs/api-routes/introduction
-import type { NextApiRequest, NextApiResponse } from "next";
-
-type Data = {
-  name: string;
-};
-
-export default function handler(
-  req: NextApiRequest,
-  res: NextApiResponse<Data>,
-) {
-  res.status(200).json({ name: "John Doe" });
-}
-</file>
-
 <file path="README.md">
 This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
 
@@ -7714,39 +7776,6 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
-</file>
-
-<file path="styles/globals.css">
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  --green-dark:   #1B5E20;
-  --green-mid:    #2E7D32;
-  --green-accent: #43A047;
-  --green-light:  #C8E6C9;
-  --green-pale:   #F1F8E9;
-}
-
-html { -webkit-tap-highlight-color: transparent; }
-
-body {
-  background: var(--green-pale);
-  font-family: 'Inter', 'Segoe UI', sans-serif;
-  overscroll-behavior: none;
-}
-
-/* Smooth scrolling within chat */
-.chat-scroll { scroll-behavior: smooth; }
-
-/* PWA safe area padding */
-.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 16px); }
-.safe-top    { padding-top:    env(safe-area-inset-top,    0px);   }
-
-/* Status badge animations */
-.badge-pulse { animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
 </file>
 
 <file path="styles/Home.module.css">
@@ -7917,6 +7946,30 @@ a.secondary {
 }
 </file>
 
+<file path="tailwind.config.js">
+module.exports = {
+  content: ['./pages/**/*.{js,jsx}', './components/**/*.{js,jsx}'],
+  theme: {
+    extend: {
+      colors: {
+        green: {
+          50:  '#F1F8E9', 100: '#DCEDC8', 200: '#C8E6C9',
+          300: '#A5D6A7', 400: '#81C784', 500: '#66BB6A',
+          600: '#43A047', 700: '#2E7D32', 800: '#1B5E20',
+          900: '#154318'
+        }
+      },
+      fontFamily: { sans: ['Inter', 'Segoe UI', 'sans-serif'] },
+      boxShadow: {
+        card: '0 2px 12px rgba(27,94,32,0.08)',
+        nav:  '0 -2px 16px rgba(27,94,32,0.12)'
+      }
+    }
+  },
+  plugins: []
+}
+</file>
+
 <file path="tsconfig.json">
 {
   "compilerOptions": {
@@ -7939,6 +7992,317 @@ a.secondary {
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
   "exclude": ["node_modules"]
 }
+</file>
+
+<file path=".gitignore">
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# Google service account key
+mvgfc-e-library-3a319dd2877f.json
+
+.env.local
+.env*.local
+
+node_modules/
+.next/
+.env.local
+.env*.local
+*.log
+.DS_Store
+</file>
+
+<file path="package.json">
+{
+  "name": "mvgfc-elibrary",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -p $PORT",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.1",
+    "axios": "^1.13.6",
+    "bcryptjs": "^3.0.3",
+    "googleapis": "^171.4.0",
+    "joi": "^18.0.2",
+    "jspdf": "^4.2.1",
+    "next": "14.2.35",
+    "next-auth": "^4.24.13",
+    "next-pwa": "^5.6.0",
+    "pusher": "^5.3.2",
+    "pusher-js": "^8.4.0",
+    "react": "^18",
+    "react-dom": "^18",
+    "swr": "^2.4.1",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10.4.27",
+    "eslint": "^9.39.3",
+    "eslint-config-next": "^16.1.6",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5"
+  }
+}
+</file>
+
+<file path="pages/profile.jsx">
+import { signOut, useSession } from 'next-auth/react'
+import { useState }            from 'react'
+import AppLayout               from '../components/layout/AppLayout'
+import Avatar                  from '../components/ui/Avatar'
+import StatusBadge             from '../components/ui/StatusBadge'
+import Spinner                 from '../components/ui/Spinner'
+import { useNotifications }    from '../hooks/useNotifications'
+import { useBorrows }          from '../hooks/useBorrows'
+import { fmtDate, fmtTime }   from '../lib/utils'
+
+export default function ProfilePage() {
+  const { data: session }                   = useSession()
+  const [showAllNotifs, setShowAllNotifs]   = useState(false)
+  const [signingOut, setSigningOut]         = useState(false)
+  const { notifications, markRead, loading: nLoading } = useNotifications()
+  const { borrows }                         = useBorrows()
+
+  if (!session) return null
+  const user = session.user
+
+  const stats = {
+    total:    borrows.length,
+    active:   borrows.filter(b => b.status === 'APPROVED').length,
+    returned: borrows.filter(b => b.status === 'RETURNED').length,
+    pending:  borrows.filter(b => b.status === 'PENDING').length
+  }
+
+  const visibleNotifs = showAllNotifs ? notifications : notifications.slice(0, 5)
+
+  async function handleSignOut() {
+    setSigningOut(true)
+    await signOut({ callbackUrl: '/auth/signin' })
+  }
+
+  const STAT_ITEMS = [
+    { label: 'Total',    value: stats.total,    color: 'text-green-700' },
+    { label: 'Active',   value: stats.active,   color: 'text-blue-600' },
+    { label: 'Returned', value: stats.returned, color: 'text-gray-600' },
+    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600' }
+  ]
+
+  return (
+    <AppLayout title="My Profile">
+      {/* Profile card */}
+      <div className="bg-green-700 rounded-3xl p-5 mb-5 shadow-card">
+        <div className="flex items-center gap-4">
+          <Avatar name={user.name} image={user.image} size={16}/>
+          <div className="flex-1 min-w-0">
+            <p className="text-white font-bold text-base truncate">{user.name}</p>
+            <p className="text-green-200 text-xs truncate">{user.email}</p>
+            <div className="flex gap-2 mt-2 flex-wrap">
+              <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium capitalize">
+                {user.role}
+              </span>
+              {user.dept && (
+                <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium">
+                  {user.dept}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-4 gap-2 mb-5">
+        {STAT_ITEMS.map(s => (
+          <div key={s.label} className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
+            <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
+            <p className="text-[10px] text-gray-400 mt-0.5 font-medium">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Account info */}
+      <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
+        <div className="px-4 py-3 border-b border-green-50">
+          <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Account Information</p>
+        </div>
+        {[
+          { label: 'Full Name',   value: user.name },
+          { label: 'Email',       value: user.email },
+          { label: 'Role',        value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
+          { label: 'Department',  value: user.dept || '—' },
+          { label: 'Status',      value: <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">Active</span> }
+        ].map(row => (
+          <div key={row.label} className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+            <span className="text-xs text-gray-500 font-medium">{row.label}</span>
+            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">{row.value}</span>
+          </div>
+        ))}
+      </div>
+
+
+        {user.userType === 'student' && (
+          <>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Student ID</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.studentId}</span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Year & Section</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.year} - {user.section}</span>
+            </div>
+          </>
+        )}
+
+        {user.userType === 'employee' && (
+          <>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Employee No.</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.employeeNum}</span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Position</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.position}</span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Office</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.office}</span>
+            </div>
+          </>
+        )}
+
+      {/* Notifications */}
+      <div className="mb-5">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-sm font-bold text-green-800">Notifications</p>
+          <span className="text-xs text-gray-400">{notifications.filter(n => !n.isRead).length} unread</span>
+        </div>
+        {nLoading
+          ? <Spinner className="w-6 h-6"/>
+          : notifications.length === 0
+            ? <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
+                <p className="text-2xl mb-1">🔔</p>
+                <p className="text-xs text-gray-400">No notifications yet.</p>
+              </div>
+            : <>
+                <div className="space-y-2">
+                  {visibleNotifs.map(n => (
+                    <div key={n.id} onClick={() => !n.isRead && markRead(n.id)}
+                      className={`bg-white rounded-xl border shadow-card p-3 transition cursor-pointer
+                        ${n.isRead ? 'border-green-50 opacity-70' : 'border-green-200 hover:bg-green-50'}`}>
+                      <div className="flex gap-2">
+                        {!n.isRead && <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-gray-800">{n.title}</p>
+                          <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.message}</p>
+                          <p className="text-[10px] text-gray-300 mt-1">{fmtTime(n.createdAt)}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {notifications.length > 5 && (
+                  <button onClick={() => setShowAllNotifs(!showAllNotifs)}
+                    className="mt-2 w-full text-center text-xs text-green-600 font-semibold py-2">
+                    {showAllNotifs ? '▲ Show less' : `▼ Show all ${notifications.length} notifications`}
+                  </button>
+                )}
+              </>
+        }
+      </div>
+
+      {/* Sign out */}
+      <button onClick={handleSignOut} disabled={signingOut}
+        className="w-full border-2 border-red-200 text-red-500 font-semibold py-3.5 rounded-2xl
+          hover:bg-red-50 transition disabled:opacity-50 mb-8">
+        {signingOut ? 'Signing out…' : '↩ Sign Out'}
+      </button>
+    </AppLayout>
+  )
+}
+
+export async function getServerSideProps(ctx) {
+  const { getServerSession } = await import('next-auth/next')
+  const { authOptions }      = await import('./api/auth/[...nextauth]')
+  const session = await getServerSession(ctx.req, ctx.res, authOptions)
+  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
+  return { props: {} }
+}
+</file>
+
+<file path="styles/globals.css">
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --green-dark:   #1B5E20;
+  --green-mid:    #2E7D32;
+  --green-accent: #43A047;
+  --green-light:  #C8E6C9;
+  --green-pale:   #F1F8E9;
+}
+
+html { -webkit-tap-highlight-color: transparent; }
+
+body {
+  background: var(--green-pale);
+  font-family: 'Inter', 'Segoe UI', sans-serif;
+  overscroll-behavior: none;
+}
+
+/* Smooth scrolling within chat */
+.chat-scroll { scroll-behavior: smooth; }
+
+/* PWA safe area padding */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 16px); }
+.safe-top    { padding-top:    env(safe-area-inset-top,    0px);   }
+
+/* Status badge animations */
+.badge-pulse { animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
 </file>
 
 </files>

@@ -1,5 +1,3 @@
-
-
 import Link      from 'next/link'
 import { useRouter } from 'next/router'
 
@@ -17,7 +15,11 @@ export default function BottomNav() {
     <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-green-200 shadow-nav z-30 safe-bottom">
       <div className="flex max-w-lg mx-auto">
         {NAV.map(({ href, label, icon }) => {
-          const active = pathname.startsWith(href) && (href !== '/dashboard' || pathname === '/dashboard')
+          // FIX: Use exact match for all nav items to prevent both Borrow and Status
+          // highlighting at the same time. /borrow matches only itself; /borrow/status
+          // matches only itself. Dashboard also uses exact match.
+          const active = pathname === href
+
           return (
             <Link key={href} href={href}
               className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors
