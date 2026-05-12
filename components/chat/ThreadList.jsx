@@ -13,28 +13,22 @@ function fmtTime(iso) {
 export default function ThreadList({ threads, activeThread, onSelect, loading }) {
   const [users, setUsers] = useState({})
 
-  // Fetch user data for all thread participants
   useEffect(() => {
+    if (!threads.length) return
     async function fetchUsers() {
       try {
-        const response = await fetch('/api/users')
-        const data = await response.json()
+        const res  = await fetch('/api/users')
+        const data = await res.json()
         if (data.success) {
-          // Create a map of userId -> user object
-          const userMap = {}
-          data.data.forEach(user => {
-            userMap[user.id] = user
-          })
-          setUsers(userMap)
+          const map = {}
+          data.data.forEach(u => { map[u.id] = u })
+          setUsers(map)
         }
-      } catch (error) {
-        console.error('Failed to fetch users:', error)
+      } catch (err) {
+        console.error('Failed to fetch users:', err)
       }
     }
-
-    if (threads.length > 0) {
-      fetchUsers()
-    }
+    fetchUsers()
   }, [threads])
 
   if (loading) {
@@ -62,12 +56,13 @@ export default function ThreadList({ threads, activeThread, onSelect, loading })
       {threads.map(t => {
         const isActive   = t.threadId === activeThread
         const isResolved = t.threadStatus === 'RESOLVED'
-        const libraryIcon = t.library === 'HIGH_SCHOOL' ? '🎓' : '📚'
-        
-        // Get user info from the map
-        const user = users[t.threadId] || null
-        const userName = user?.name || `User ${t.threadId.slice(0, 8)}`
-        
+        const libraryIcon = t.library === 'HIGH_SCHOOL' ? '🏫' : '📚'
+
+        // Use userId field (set by API) for name lookup — works for both
+        // old (threadId=userId) and new (threadId=UUID) ticket styles
+        const user     = users[t.userId] || null
+        const userName = user?.name || `User ${(t.userId || t.threadId).slice(0, 8)}`
+
         return (
           <button key={t.threadId} onClick={() => onSelect(t.threadId)}
             className={`w-full text-left px-4 py-3.5 border-b border-green-50 hover:bg-green-50
@@ -87,11 +82,11 @@ export default function ThreadList({ threads, activeThread, onSelect, loading })
                 <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtTime(t.lastTimestamp)}</span>
               </div>
 
-              <div className="flex items-center gap-1.5 mt-0.5">
+              <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                 <ComplaintTag type={t.messageType}/>
                 {isResolved && (
                   <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">
-                    ✓ Resolved
+                    ✔ Resolved
                   </span>
                 )}
               </div>

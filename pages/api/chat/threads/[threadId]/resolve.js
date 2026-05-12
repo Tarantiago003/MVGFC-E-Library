@@ -1,5 +1,3 @@
-
-
 import { compose }     from '../../../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../../../middleware/errorHandler'
 import { withAuth }    from '../../../../../middleware/withAuth'
@@ -14,6 +12,7 @@ async function handlerResolve(req, res) {
 
   const { threadId } = req.query
   const rows = await readSheet(SHEETS.CHAT)
+
   const threadRows = rows
     .map((r, i) => ({ r, sheetRow: i + 2 }))
     .filter(({ r }) => r[COL.CHAT.THREAD_ID] === threadId)
@@ -33,4 +32,3 @@ async function handlerResolve(req, res) {
 export default compose(
   withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
 )(handlerResolve)
-

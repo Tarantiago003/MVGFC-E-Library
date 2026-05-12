@@ -77,15 +77,6 @@ export function useDashboardChat() {
         messageText: text
       })
       
-      // 🔥 FIX: Don't add to local state - let Pusher handle it
-      // This prevents the duplicate key error because:
-      // 1. Pusher will broadcast the message
-      // 2. The above useEffect will add it (with duplicate check)
-      // 3. No race condition between optimistic update and Pusher
-      
-      // OLD (caused duplicates):
-      // mutate(threadMsgKey, prev => [...(prev || []), res.data], false)
-      
       return res
     } catch (err) {
       console.error('useDashboardChat send error:', err)

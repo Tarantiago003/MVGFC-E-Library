@@ -1,22 +1,24 @@
-import { useState }   from 'react'
-import StatusBadge     from '../ui/StatusBadge'
-import Toast           from '../ui/Toast'
-import { fmtDate }     from '../../lib/utils'
-import api             from '../../lib/api'
+import { useState }  from 'react'
+import StatusBadge    from '../ui/StatusBadge'
+import Toast          from '../ui/Toast'
+import { fmtDate }    from '../../lib/utils'
+import api            from '../../lib/api'
 
 function getDaysOverdue(dueDate) {
   if (!dueDate) return 0
-  const diff = Date.now() - new Date(dueDate).getTime()
-  return Math.max(0, Math.floor(diff / 86400000))
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
 }
 
 export default function BorrowCard({ borrow, book }) {
   const [renewing, setRenewing] = useState(false)
   const [toast,    setToast]    = useState(null)
 
-  const isApproved = borrow.status === 'APPROVED'
+  const isApproved  = borrow.status === 'APPROVED'
   const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
   const isOverdue   = daysOverdue > 0
+
+  // Determine the displayed status — show OVERDUE when applicable
+  const displayStatus = isOverdue ? 'OVERDUE' : borrow.status
 
   async function handleRenew() {
     setRenewing(true)
@@ -50,8 +52,7 @@ export default function BorrowCard({ borrow, book }) {
         </div>
 
         <div className="flex flex-col items-end gap-1">
-          <StatusBadge status={borrow.status}/>
-          {/* OVERDUE BADGE */}
+          <StatusBadge status={displayStatus}/>
           {isOverdue && (
             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
               ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
@@ -82,7 +83,7 @@ export default function BorrowCard({ borrow, book }) {
         )}
       </div>
 
-      {/* RENEW BUTTON — only for approved borrows */}
+      {/* Renew button — only for approved borrows (overdue or not) */}
       {isApproved && (
         <button
           onClick={handleRenew}

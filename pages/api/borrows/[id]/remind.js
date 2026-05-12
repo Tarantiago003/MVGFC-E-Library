@@ -58,9 +58,9 @@ async function handlerRemind(req, res) {
 
   await appendRow(SHEETS.CHAT, [
     chatId,
-    user[COL.USERS.ID],   // threadId = borrower's userId
-    req.user.id,           // senderId = staff member
-    req.user.role,         // senderRole
+    user[COL.USERS.ID],   
+    req.user.id,           
+    req.user.role,         
     'INQUIRY',
     chatText,
     timestamp,

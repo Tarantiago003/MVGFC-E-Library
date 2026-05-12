@@ -1,7 +1,7 @@
-
 const META = {
   PENDING:   { label: 'Pending',   cls: 'bg-yellow-100 text-yellow-800', dot: 'bg-yellow-400 animate-pulse' },
   APPROVED:  { label: 'Approved',  cls: 'bg-green-100  text-green-800',  dot: 'bg-green-500' },
+  OVERDUE:   { label: 'Overdue',   cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500 animate-pulse' },
   REJECTED:  { label: 'Rejected',  cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500' },
   RETURNED:  { label: 'Returned',  cls: 'bg-blue-100   text-blue-800',   dot: 'bg-blue-400' },
   OPEN:      { label: 'Open',      cls: 'bg-orange-100 text-orange-800', dot: 'bg-orange-400' },
@@ -10,6 +10,7 @@ const META = {
   inactive:  { label: 'Inactive',  cls: 'bg-gray-100   text-gray-600',   dot: 'bg-gray-400' },
   suspended: { label: 'Suspended', cls: 'bg-red-100    text-red-700',    dot: 'bg-red-500' }
 }
+
 export default function StatusBadge({ status }) {
   const m = META[status] || { label: status, cls: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' }
   return (

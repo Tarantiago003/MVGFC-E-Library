@@ -1,11 +1,14 @@
-
-
 import StatusBadge from '../ui/StatusBadge'
 import Table       from '../ui/Table'
 
 function fmtDate(iso) {
   if (!iso) return '—'
   return new Date(iso).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
 }
 
 const COLS = ['Request ID', 'User', 'Book', 'Location', 'Status', 'Requested', 'Due', 'Actions']
@@ -17,10 +20,13 @@ export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, u
   return (
     <Table columns={COLS} caption={`${borrows.length} record(s) found`}>
       {borrows.map(b => {
-        const u = userMap[b.userId]
+        const u  = userMap[b.userId]
         const bk = bookMap[b.bookId]
+        const daysOverdue = getDaysOverdue(b.dueDate)
+        const isOverdue   = b.status === 'APPROVED' && daysOverdue > 0
+
         return (
-          <tr key={b.id} className="hover:bg-green-50/50 transition">
+          <tr key={b.id} className={`hover:bg-green-50/50 transition ${isOverdue ? 'bg-red-50/30' : ''}`}>
             <td className="px-4 py-3">
               <span className="font-mono text-xs text-gray-400">{b.id.slice(0, 8)}…</span>
             </td>
@@ -34,12 +40,27 @@ export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, u
             </td>
             <td className="px-4 py-3">
               <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
-                {b.location === 'HIGH_SCHOOL' ? '🏫 HS Dept' : '🏛️ Main'}
+                {b.location === 'HIGH_SCHOOL' ? '🏫 HS Dept' : '📚 Main'}
               </span>
             </td>
-            <td className="px-4 py-3"><StatusBadge status={b.status}/></td>
+            <td className="px-4 py-3">
+              <div className="flex flex-col gap-1 items-start">
+                {/* Show OVERDUE badge when past due, else normal status */}
+                <StatusBadge status={isOverdue ? 'OVERDUE' : b.status}/>
+                {isOverdue && (
+                  <span className="text-[10px] text-red-600 font-semibold">
+                    {daysOverdue}d past due
+                  </span>
+                )}
+              </div>
+            </td>
             <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{fmtDate(b.requestDate)}</td>
-            <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{fmtDate(b.dueDate)}</td>
+            <td className="px-4 py-3">
+              <p className={`text-xs whitespace-nowrap font-medium
+                ${isOverdue ? 'text-red-600' : 'text-gray-500'}`}>
+                {fmtDate(b.dueDate)}
+              </p>
+            </td>
             <td className="px-4 py-3">
               <div className="flex gap-1.5 items-center">
                 {b.status === 'PENDING' && (

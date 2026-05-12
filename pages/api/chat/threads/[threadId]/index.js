@@ -2,7 +2,7 @@ import { compose }     from '../../../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../../../middleware/errorHandler'
 import { withAuth }    from '../../../../../middleware/withAuth'
 import { rateLimiter } from '../../../../../middleware/rateLimiter'
-import { readSheet, batchUpdate, rowNum, cellRange } from '../../../../../lib/sheets'
+import { readSheet, batchUpdate, cellRange } from '../../../../../lib/sheets'
 import { SHEETS, COL, ROLES } from '../../../../../lib/constants'
 
 export function toMessage(r) {
@@ -26,44 +26,33 @@ async function handlerThread(req, res) {
   const { threadId } = req.query
   const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
 
-  // Users can only read their own thread
-  if (!isStaff && threadId !== req.user.id)
-    httpError(403, 'Access denied')
-
   const rows = await readSheet(SHEETS.CHAT)
   let msgs = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
-  
   if (!msgs.length) httpError(404, 'Thread not found')
 
-  // 🔧 FIX: More permissive library filtering for clerks
-  if (req.user.role === ROLES.CLERK) {
-    const assignedLibrary = req.user.assignedLibrary
-    
-    // If clerk has NO assigned library, deny access entirely
-    if (!assignedLibrary) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'No library assigned to your account. Please contact admin.' 
-      })
-    }
-    
-    // Check thread library (use first message's library location)
-    const threadLibrary = msgs[0]?.[COL.CHAT.LIBRARY_LOCATION]
-    
-    // 🔧 FIX: Only deny if thread has a library AND it doesn't match
-    // If threadLibrary is empty/undefined, allow access (legacy threads)
-    if (threadLibrary && threadLibrary !== assignedLibrary) {
-      return res.status(403).json({
-        success: false,
-        error: `This conversation belongs to ${threadLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}. You are assigned to ${assignedLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}.`
-      })
-    }
+  // Users: verify ownership via senderId (works for UUID threads too)
+  if (!isStaff) {
+    const isOwner = msgs.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+    if (!isOwner) httpError(403, 'Access denied')
   }
 
-  // Mark messages as read (for staff viewing)
+  // Clerks: library-based filtering
+  if (req.user.role === ROLES.CLERK) {
+    const assignedLibrary = req.user.assignedLibrary
+    if (!assignedLibrary)
+      return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
+    const threadLibrary = msgs[0]?.[COL.CHAT.LIBRARY_LOCATION]
+    if (threadLibrary && threadLibrary !== assignedLibrary)
+      return res.status(403).json({
+        success: false,
+        error: `This conversation belongs to a different library.`
+      })
+  }
+
+  // Mark messages as read (staff viewing user messages)
   if (isStaff) {
     const unread = msgs
-      .map((r, i) => ({ r, sheetRow: rows.indexOf(r) + 2 }))
+      .map((r, _) => ({ r, sheetRow: rows.indexOf(r) + 2 }))
       .filter(({ r }) => r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
 
     if (unread.length) {

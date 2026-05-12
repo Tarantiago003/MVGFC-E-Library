@@ -15,9 +15,7 @@ export default function BottomNav() {
     <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-green-200 shadow-nav z-30 safe-bottom">
       <div className="flex max-w-lg mx-auto">
         {NAV.map(({ href, label, icon }) => {
-          // FIX: Use exact match for all nav items to prevent both Borrow and Status
-          // highlighting at the same time. /borrow matches only itself; /borrow/status
-          // matches only itself. Dashboard also uses exact match.
+
           const active = pathname === href
 
           return (

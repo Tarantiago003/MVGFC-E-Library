@@ -155,168 +155,6 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
-<file path="pages/api/borrows/[id]/extend.js">
-import Joi from 'joi'
-import { v4 as uuid } from 'uuid'
-import { compose }     from '../../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
-import { withAuth }    from '../../../../middleware/withAuth'
-import { withRole }    from '../../../../middleware/withRole'
-import { rateLimiter } from '../../../../middleware/rateLimiter'
-import { trigger, ch } from '../../../../lib/pusher'
-import { readSheet, appendRow, batchUpdate, rowNum, cellRange } from '../../../../lib/sheets'
-import {
-  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS
-} from '../../../../lib/constants'
-
-const schema = Joi.object({
-  dueDate: Joi.string().isoDate().required()
-})
-
-async function handlerExtend(req, res) {
-  if (req.method !== 'PATCH')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  const { id } = req.query
-  const { error, value } = schema.validate(req.body)
-  if (error) httpError(400, error.details[0].message)
-
-  const { dueDate } = value
-  const rows   = await readSheet(SHEETS.BORROWS)
-  const borrow = rows.find(r => r[COL.BORROWS.ID] === id)
-
-  if (!borrow) httpError(404, 'Borrow request not found')
-  if (borrow[COL.BORROWS.STATUS] !== BORROW_STATUS.APPROVED)
-    httpError(400, 'Can only extend due date for approved borrows')
-
-  // Clerks can only manage their assigned library
-  if (req.user.role === ROLES.CLERK) {
-    if (borrow[COL.BORROWS.LOCATION] !== req.user.assignedLibrary)
-      httpError(403, 'This borrow belongs to a different library')
-  }
-
-  const rn  = rowNum(rows, COL.BORROWS.ID, id)
-  if (rn === -1) httpError(404, 'Borrow row not found')
-
-  const now  = new Date().toISOString()
-  const note = `Due date extended to ${dueDate} by ${req.user.name} on ${now}`
-
-  await batchUpdate([
-    { range: cellRange(SHEETS.BORROWS, rn, COL.BORROWS.DUE_DATE), values: [dueDate] },
-    { range: cellRange(SHEETS.BORROWS, rn, COL.BORROWS.NOTES),    values: [note]    }
-  ])
-
-  // Notify the borrower
-  const borrowerId = borrow[COL.BORROWS.USER_ID]
-  const formattedDue = new Date(dueDate).toLocaleDateString('en-PH', {
-    year: 'numeric', month: 'long', day: 'numeric'
-  })
-
-  await appendRow(SHEETS.NOTIFICATIONS, [
-    uuid(), borrowerId,
-    NOTIF_TYPE.BORROW_APPROVED,
-    '📅 Due Date Extended',
-    `Great news! Your borrowing due date has been extended to ${formattedDue}.`,
-    id, 'FALSE', now
-  ])
-
-  await trigger(ch.borrowStat(borrowerId), 'status-updated', {
-    requestId: id,
-    status:    BORROW_STATUS.APPROVED,
-    message:   `Your due date has been extended to ${formattedDue}`
-  })
-
-  res.json({ success: true, message: `Due date extended to ${formattedDue}.` })
-}
-
-export default compose(
-  withErrorHandler,
-  rateLimiter(),
-  withAuth,
-  withRole(ROLES.ADMIN, ROLES.CLERK)
-)(handlerExtend)
-</file>
-
-<file path="pages/api/borrows/[id]/renew.js">
-import { v4 as uuid } from 'uuid'
-import { compose }     from '../../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
-import { withAuth }    from '../../../../middleware/withAuth'
-import { rateLimiter } from '../../../../middleware/rateLimiter'
-import { trigger, ch } from '../../../../lib/pusher'
-import { readSheet, appendRow } from '../../../../lib/sheets'
-import {
-  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS, THREAD_STATUS
-} from '../../../../lib/constants'
-
-async function handlerRenew(req, res) {
-  if (req.method !== 'POST')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  if (req.user.role !== ROLES.USER)
-    httpError(403, 'Only borrowers can request renewals')
-
-  const { id } = req.query
-  const borrows = await readSheet(SHEETS.BORROWS)
-  const borrow  = borrows.find(r => r[COL.BORROWS.ID] === id)
-
-  if (!borrow) httpError(404, 'Borrow request not found')
-  if (borrow[COL.BORROWS.USER_ID] !== req.user.id) httpError(403, 'Access denied')
-  if (borrow[COL.BORROWS.STATUS]  !== BORROW_STATUS.APPROVED)
-    httpError(400, 'Can only request renewal for approved borrows')
-
-  const location  = borrow[COL.BORROWS.LOCATION]
-  const bookId    = borrow[COL.BORROWS.BOOK_ID]
-  const dueDate   = borrow[COL.BORROWS.DUE_DATE]
-  const timestamp = new Date().toISOString()
-
-  const formattedDue = dueDate
-    ? new Date(dueDate).toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })
-    : 'N/A'
-
-  // Message posted to the user's own chat thread so staff can see & respond
-  const chatText = `📖 Renewal Request — Hi! I would like to request a renewal for Assc. No. ${bookId}. Current due date: ${formattedDue}. Please let me know if it can be extended. Thank you!`
-
-  const chatId = uuid()
-  await appendRow(SHEETS.CHAT, [
-    chatId,
-    req.user.id,        // threadId = userId
-    req.user.id,        // senderId
-    ROLES.USER,         // senderRole
-    'INQUIRY',          // messageType
-    chatText,
-    timestamp,
-    'FALSE',
-    THREAD_STATUS.OPEN,
-    location
-  ])
-
-  // Real-time: update user's own chat page
-  await trigger(ch.chat(req.user.id), 'new-message', {
-    id:          chatId,
-    threadId:    req.user.id,
-    senderId:    req.user.id,
-    senderName:  req.user.name,
-    senderRole:  ROLES.USER,
-    messageText: chatText,
-    timestamp,
-    libraryLocation: location
-  })
-
-  // Real-time: notify admin inbox (thread list refresh)
-  await trigger(ch.adminInbox(location), 'new-chat-message', {
-    threadId: req.user.id,
-    userName: req.user.name,
-    preview:  chatText.substring(0, 80),
-    library:  location
-  })
-
-  res.json({ success: true, message: 'Renewal request sent to library staff.' })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerRenew)
-</file>
-
 <file path="components/borrow/BookCard.jsx">
 export default function BookCard({ book, selected, onClick }) {
   const avail = book.available > 0
@@ -339,108 +177,6 @@ export default function BookCard({ book, selected, onClick }) {
       </div>
       {selected && <span className="text-green-600 text-lg flex-shrink-0">✓</span>}
     </button>
-  )
-}
-</file>
-
-<file path="components/borrow/BorrowCard.jsx">
-import { useState }   from 'react'
-import StatusBadge     from '../ui/StatusBadge'
-import Toast           from '../ui/Toast'
-import { fmtDate }     from '../../lib/utils'
-import api             from '../../lib/api'
-
-function getDaysOverdue(dueDate) {
-  if (!dueDate) return 0
-  const diff = Date.now() - new Date(dueDate).getTime()
-  return Math.max(0, Math.floor(diff / 86400000))
-}
-
-export default function BorrowCard({ borrow, book }) {
-  const [renewing, setRenewing] = useState(false)
-  const [toast,    setToast]    = useState(null)
-
-  const isApproved = borrow.status === 'APPROVED'
-  const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
-  const isOverdue   = daysOverdue > 0
-
-  async function handleRenew() {
-    setRenewing(true)
-    try {
-      await api.post(`/borrows/${borrow.id}/renew`)
-      setToast({ message: 'Renewal request sent to library staff!', type: 'success' })
-    } catch (err) {
-      setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
-    } finally {
-      setRenewing(false)
-    }
-  }
-
-  return (
-    <div className={`bg-white rounded-2xl border shadow-card p-4
-      ${isOverdue ? 'border-red-200' : 'border-green-100'}`}>
-
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
-
-      <div className="flex gap-3 items-start">
-        {book?.coverImageUrl
-          ? <img src={book.coverImageUrl} alt={book.title} className="w-10 h-14 object-cover rounded-lg flex-shrink-0"/>
-          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📚</div>
-        }
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-gray-800 truncate">
-            {book?.title || `Assc. No. ${borrow.bookId}`}
-          </p>
-          <p className="text-xs text-gray-500 truncate">{book?.author}</p>
-          <p className="text-xs text-green-700 mt-1">{borrow.location?.replace('_', ' ')}</p>
-        </div>
-
-        <div className="flex flex-col items-end gap-1">
-          <StatusBadge status={borrow.status}/>
-          {/* OVERDUE BADGE */}
-          {isOverdue && (
-            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
-              ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
-              {daysOverdue}d overdue
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-3 pt-3 border-t border-green-50 grid grid-cols-2 gap-2">
-        <div>
-          <p className="text-[10px] text-gray-400 uppercase font-medium">Requested</p>
-          <p className="text-xs text-gray-700">{fmtDate(borrow.requestDate)}</p>
-        </div>
-        {borrow.dueDate && (
-          <div>
-            <p className="text-[10px] text-gray-400 uppercase font-medium">Due Date</p>
-            <p className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-700'}`}>
-              {fmtDate(borrow.dueDate)}
-            </p>
-          </div>
-        )}
-        {borrow.notes && (
-          <div className="col-span-2">
-            <p className="text-[10px] text-gray-400 uppercase font-medium">Note</p>
-            <p className="text-xs text-gray-600">{borrow.notes}</p>
-          </div>
-        )}
-      </div>
-
-      {/* RENEW BUTTON — only for approved borrows */}
-      {isApproved && (
-        <button
-          onClick={handleRenew}
-          disabled={renewing}
-          className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
-            ${isOverdue
-              ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
-              : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
-          {renewing ? 'Sending request…' : '🔄 Request Renewal'}
-        </button>
-      )}
-    </div>
   )
 }
 </file>
@@ -601,6 +337,11 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
+}
+
 const COLS = ['Request ID', 'User', 'Book', 'Location', 'Status', 'Requested', 'Due', 'Actions']
 
 export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, users, books }) {
@@ -610,10 +351,13 @@ export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, u
   return (
     <Table columns={COLS} caption={`${borrows.length} record(s) found`}>
       {borrows.map(b => {
-        const u = userMap[b.userId]
+        const u  = userMap[b.userId]
         const bk = bookMap[b.bookId]
+        const daysOverdue = getDaysOverdue(b.dueDate)
+        const isOverdue   = b.status === 'APPROVED' && daysOverdue > 0
+
         return (
-          <tr key={b.id} className="hover:bg-green-50/50 transition">
+          <tr key={b.id} className={`hover:bg-green-50/50 transition ${isOverdue ? 'bg-red-50/30' : ''}`}>
             <td className="px-4 py-3">
               <span className="font-mono text-xs text-gray-400">{b.id.slice(0, 8)}…</span>
             </td>
@@ -627,12 +371,27 @@ export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, u
             </td>
             <td className="px-4 py-3">
               <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
-                {b.location === 'HIGH_SCHOOL' ? '🏫 HS Dept' : '🏛️ Main'}
+                {b.location === 'HIGH_SCHOOL' ? '🏫 HS Dept' : '📚 Main'}
               </span>
             </td>
-            <td className="px-4 py-3"><StatusBadge status={b.status}/></td>
+            <td className="px-4 py-3">
+              <div className="flex flex-col gap-1 items-start">
+                {/* Show OVERDUE badge when past due, else normal status */}
+                <StatusBadge status={isOverdue ? 'OVERDUE' : b.status}/>
+                {isOverdue && (
+                  <span className="text-[10px] text-red-600 font-semibold">
+                    {daysOverdue}d past due
+                  </span>
+                )}
+              </div>
+            </td>
             <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{fmtDate(b.requestDate)}</td>
-            <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{fmtDate(b.dueDate)}</td>
+            <td className="px-4 py-3">
+              <p className={`text-xs whitespace-nowrap font-medium
+                ${isOverdue ? 'text-red-600' : 'text-gray-500'}`}>
+                {fmtDate(b.dueDate)}
+              </p>
+            </td>
             <td className="px-4 py-3">
               <div className="flex gap-1.5 items-center">
                 {b.status === 'PENDING' && (
@@ -662,226 +421,6 @@ export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, u
         )
       })}
     </Table>
-  )
-}
-</file>
-
-<file path="components/borrows/OverduePanel.jsx">
-import { useState }  from 'react'
-import Modal           from '../ui/Modal'
-import api             from '../../lib/api'
-
-function fmtDate(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })
-}
-
-function getDaysOverdue(dueDate) {
-  if (!dueDate) return 0
-  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
-}
-
-export default function OverduePanel({ borrows, users, books, onSendReminder, onExtend }) {
-  const [reminderTarget, setReminderTarget] = useState(null)
-  const [extendTarget,   setExtendTarget]   = useState(null)
-  const [newDueDate,     setNewDueDate]      = useState('')
-  const [sending,        setSending]         = useState(false)
-  const [extending,      setExtending]       = useState(false)
-
-  const overdueBorrows = borrows
-    .filter(b => b.status === 'APPROVED' && b.dueDate && getDaysOverdue(b.dueDate) > 0)
-    .sort((a, b) => getDaysOverdue(b.dueDate) - getDaysOverdue(a.dueDate))
-
-  const userMap = Object.fromEntries((users || []).map(u => [u.id, u]))
-  const bookMap = Object.fromEntries((books || []).map(b => [b.id, b]))
-
-  async function handleSendReminder() {
-    if (!reminderTarget) return
-    setSending(true)
-    try {
-      await onSendReminder(reminderTarget.id)
-      setReminderTarget(null)
-    } finally {
-      setSending(false)
-    }
-  }
-
-  async function handleExtend() {
-    if (!extendTarget || !newDueDate) return
-    setExtending(true)
-    try {
-      await onExtend(extendTarget.id, newDueDate)
-      setExtendTarget(null)
-      setNewDueDate('')
-    } finally {
-      setExtending(false)
-    }
-  }
-
-  if (overdueBorrows.length === 0) {
-    return (
-      <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-8 text-center">
-        <span className="text-4xl mb-3 block">✅</span>
-        <p className="font-semibold text-green-800">No Overdue Books</p>
-        <p className="text-sm text-gray-400 mt-1">All borrowed books are within their due dates.</p>
-      </div>
-    )
-  }
-
-  return (
-    <>
-      <div className="bg-white rounded-2xl border border-red-100 shadow-sm overflow-hidden">
-        <div className="px-5 py-3 bg-red-50 border-b border-red-100">
-          <p className="text-sm font-bold text-red-700">
-            ⚠️ {overdueBorrows.length} Overdue Book{overdueBorrows.length > 1 ? 's' : ''}
-          </p>
-        </div>
-
-        <div className="divide-y divide-red-50">
-          {overdueBorrows.map(b => {
-            const u   = userMap[b.userId]
-            const bk  = bookMap[b.bookId]
-            const days = getDaysOverdue(b.dueDate)
-
-            return (
-              <div key={b.id} className="px-5 py-4 hover:bg-red-50/50 transition">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-2 flex-wrap">
-                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold
-                        ${days > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
-                        {days} day{days > 1 ? 's' : ''} overdue
-                      </span>
-                      <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
-                        {b.location === 'HIGH_SCHOOL' ? '🏫 HS' : '📚 Main'}
-                      </span>
-                    </div>
-
-                    <p className="font-semibold text-sm text-gray-800 truncate">
-                      {bk?.title || `Assc. No. ${b.bookId}`}
-                    </p>
-                    <p className="text-xs text-gray-500 truncate">{bk?.author}</p>
-
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <span className="text-gray-400">Borrower:</span>
-                        <p className="font-medium text-gray-700">{u?.name || '—'}</p>
-                        <p className="text-gray-400">{u?.email}</p>
-                      </div>
-                      <div>
-                        <span className="text-gray-400">Due Date:</span>
-                        <p className="font-medium text-red-600">{fmtDate(b.dueDate)}</p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-2 flex-shrink-0">
-                    <button
-                      onClick={() => setReminderTarget(b)}
-                      className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition">
-                      📩 Remind
-                    </button>
-                    <button
-                      onClick={() => {
-                        setExtendTarget(b)
-                        // Default to 7 days from today
-                        setNewDueDate(new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0])
-                      }}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition">
-                      📅 Extend
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* Reminder confirmation modal */}
-      <Modal open={!!reminderTarget} onClose={() => setReminderTarget(null)}
-        title="📩 Send Overdue Reminder">
-        {reminderTarget && (
-          <div className="space-y-4">
-            <div className="bg-red-50 border border-red-100 rounded-xl p-4">
-              <p className="text-sm font-semibold text-red-800 mb-2">
-                Send reminder to: {userMap[reminderTarget.userId]?.name}
-              </p>
-              <p className="text-xs text-gray-600">Email: {userMap[reminderTarget.userId]?.email}</p>
-              <p className="text-xs text-gray-600 mt-1">
-                Book: {bookMap[reminderTarget.bookId]?.title || reminderTarget.bookId}
-              </p>
-              <p className="text-xs text-red-600 font-semibold mt-2">
-                {getDaysOverdue(reminderTarget.dueDate)} days overdue
-              </p>
-            </div>
-            <p className="text-sm text-gray-600">
-              This will send an in-app notification <strong>and</strong> post a message in the
-              borrower's chat thread so they can reply.
-            </p>
-            <div className="flex gap-3 pt-2">
-              <button onClick={() => setReminderTarget(null)} disabled={sending}
-                className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
-                  py-2.5 rounded-xl hover:bg-gray-50 transition disabled:opacity-50">
-                Cancel
-              </button>
-              <button onClick={handleSendReminder} disabled={sending}
-                className="flex-1 bg-red-600 text-white font-semibold py-2.5 rounded-xl
-                  hover:bg-red-700 transition disabled:opacity-50">
-                {sending ? 'Sending…' : '✉️ Send Reminder'}
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* Extend due date modal */}
-      <Modal open={!!extendTarget} onClose={() => { setExtendTarget(null); setNewDueDate('') }}
-        title="📅 Extend Due Date">
-        {extendTarget && (
-          <div className="space-y-4">
-            <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-sm">
-              <p className="font-semibold text-blue-800 mb-1">
-                {bookMap[extendTarget.bookId]?.title || `Assc. No. ${extendTarget.bookId}`}
-              </p>
-              <p className="text-gray-600">
-                Borrower: {userMap[extendTarget.userId]?.name}
-              </p>
-              <p className="text-red-600 text-xs font-semibold mt-1">
-                Currently {getDaysOverdue(extendTarget.dueDate)} days overdue
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                New Due Date <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="date"
-                value={newDueDate}
-                min={new Date().toISOString().split('T')[0]}
-                onChange={e => setNewDueDate(e.target.value)}
-                className="w-full border border-green-200 rounded-xl px-3 py-2.5 text-sm
-                  focus:outline-none focus:ring-2 focus:ring-green-500"
-              />
-            </div>
-
-            <div className="flex gap-3 pt-2">
-              <button onClick={() => { setExtendTarget(null); setNewDueDate('') }} disabled={extending}
-                className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
-                  py-2.5 rounded-xl hover:bg-gray-50 transition disabled:opacity-50">
-                Cancel
-              </button>
-              <button onClick={handleExtend} disabled={extending || !newDueDate}
-                className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
-                  hover:bg-blue-700 transition disabled:opacity-50">
-                {extending ? 'Extending…' : '✅ Extend'}
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
-    </>
   )
 }
 </file>
@@ -1276,28 +815,22 @@ function fmtTime(iso) {
 export default function ThreadList({ threads, activeThread, onSelect, loading }) {
   const [users, setUsers] = useState({})
 
-  // Fetch user data for all thread participants
   useEffect(() => {
+    if (!threads.length) return
     async function fetchUsers() {
       try {
-        const response = await fetch('/api/users')
-        const data = await response.json()
+        const res  = await fetch('/api/users')
+        const data = await res.json()
         if (data.success) {
-          // Create a map of userId -> user object
-          const userMap = {}
-          data.data.forEach(user => {
-            userMap[user.id] = user
-          })
-          setUsers(userMap)
+          const map = {}
+          data.data.forEach(u => { map[u.id] = u })
+          setUsers(map)
         }
-      } catch (error) {
-        console.error('Failed to fetch users:', error)
+      } catch (err) {
+        console.error('Failed to fetch users:', err)
       }
     }
-
-    if (threads.length > 0) {
-      fetchUsers()
-    }
+    fetchUsers()
   }, [threads])
 
   if (loading) {
@@ -1325,12 +858,13 @@ export default function ThreadList({ threads, activeThread, onSelect, loading })
       {threads.map(t => {
         const isActive   = t.threadId === activeThread
         const isResolved = t.threadStatus === 'RESOLVED'
-        const libraryIcon = t.library === 'HIGH_SCHOOL' ? '🎓' : '📚'
-        
-        // Get user info from the map
-        const user = users[t.threadId] || null
-        const userName = user?.name || `User ${t.threadId.slice(0, 8)}`
-        
+        const libraryIcon = t.library === 'HIGH_SCHOOL' ? '🏫' : '📚'
+
+        // Use userId field (set by API) for name lookup — works for both
+        // old (threadId=userId) and new (threadId=UUID) ticket styles
+        const user     = users[t.userId] || null
+        const userName = user?.name || `User ${(t.userId || t.threadId).slice(0, 8)}`
+
         return (
           <button key={t.threadId} onClick={() => onSelect(t.threadId)}
             className={`w-full text-left px-4 py-3.5 border-b border-green-50 hover:bg-green-50
@@ -1350,11 +884,11 @@ export default function ThreadList({ threads, activeThread, onSelect, loading })
                 <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtTime(t.lastTimestamp)}</span>
               </div>
 
-              <div className="flex items-center gap-1.5 mt-0.5">
+              <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                 <ComplaintTag type={t.messageType}/>
                 {isResolved && (
                   <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">
-                    ✓ Resolved
+                    ✔ Resolved
                   </span>
                 )}
               </div>
@@ -1419,47 +953,6 @@ export default function AppLayout({ title, children, back }) {
       </main>
       <BottomNav />
     </div>
-  )
-}
-</file>
-
-<file path="components/layout/BottomNav.jsx">
-import Link      from 'next/link'
-import { useRouter } from 'next/router'
-
-const NAV = [
-  { href: '/dashboard', label: 'Home',    icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
-  { href: '/borrow',    label: 'Borrow',  icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
-  { href: '/borrow/status', label: 'Status', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
-  { href: '/chat',      label: 'Chat',    icon: 'M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
-  { href: '/profile',   label: 'Profile', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' }
-]
-
-export default function BottomNav() {
-  const { pathname } = useRouter()
-  return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-green-200 shadow-nav z-30 safe-bottom">
-      <div className="flex max-w-lg mx-auto">
-        {NAV.map(({ href, label, icon }) => {
-          // FIX: Use exact match for all nav items to prevent both Borrow and Status
-          // highlighting at the same time. /borrow matches only itself; /borrow/status
-          // matches only itself. Dashboard also uses exact match.
-          const active = pathname === href
-
-          return (
-            <Link key={href} href={href}
-              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors
-                ${active ? 'text-green-700' : 'text-gray-400 hover:text-green-600'}`}>
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d={icon}/>
-              </svg>
-              <span className={`text-[10px] font-medium ${active ? 'text-green-800' : ''}`}>{label}</span>
-              {active && <span className="w-1 h-1 rounded-full bg-green-600 mt-0.5"/>}
-            </Link>
-          )
-        })}
-      </div>
-    </nav>
   )
 }
 </file>
@@ -1759,6 +1252,7 @@ export default function StatCard({ label, value, icon, color = 'green', trend })
 const META = {
   PENDING:   { label: 'Pending',   cls: 'bg-yellow-100 text-yellow-800', dot: 'bg-yellow-400 animate-pulse' },
   APPROVED:  { label: 'Approved',  cls: 'bg-green-100  text-green-800',  dot: 'bg-green-500' },
+  OVERDUE:   { label: 'Overdue',   cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500 animate-pulse' },
   REJECTED:  { label: 'Rejected',  cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500' },
   RETURNED:  { label: 'Returned',  cls: 'bg-blue-100   text-blue-800',   dot: 'bg-blue-400' },
   OPEN:      { label: 'Open',      cls: 'bg-orange-100 text-orange-800', dot: 'bg-orange-400' },
@@ -1767,6 +1261,7 @@ const META = {
   inactive:  { label: 'Inactive',  cls: 'bg-gray-100   text-gray-600',   dot: 'bg-gray-400' },
   suspended: { label: 'Suspended', cls: 'bg-red-100    text-red-700',    dot: 'bg-red-500' }
 }
+
 export default function StatusBadge({ status }) {
   const m = META[status] || { label: status, cls: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' }
   return (
@@ -2024,94 +1519,110 @@ export function useBorrows(filters = {}) {
 <file path="hooks/useChat.js">
 import useSWR, { mutate } from 'swr'
 import api from '../lib/api'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { subscribeChannel } from '../lib/pusher-client'
 import { useSession } from 'next-auth/react'
 
 const fetcher = url => api.get(url).then(d => d.data)
-const CHAT_KEY = '/chat/threads/me'
+const THREADS_KEY = '/chat/threads/me'
 
 export function useChat() {
   const { data: session } = useSession()
   const userId = session?.user?.id
-  
-  const sendingRef = useRef(false)
-  const lastSendTimeRef = useRef(0)
-  const messageQueueRef = useRef(null)
 
-  const { data, error, isLoading } = useSWR(CHAT_KEY, fetcher, {
+  const [activeThreadId, setActiveThreadId] = useState(null)
+
+  const sendingRef       = useRef(false)
+  const lastSendTimeRef  = useRef(0)
+  const messageQueueRef  = useRef(null)
+
+  // All user's ticket summaries
+  const { data: threads, error: threadsError, isLoading: threadsLoading } = useSWR(
+    THREADS_KEY, fetcher, { revalidateOnFocus: false }
+  )
+
+  // Messages for the active thread
+  const threadMsgKey = activeThreadId ? `/chat/threads/${activeThreadId}` : null
+  const { data: messages, isLoading: messagesLoading } = useSWR(threadMsgKey, fetcher, {
     revalidateOnFocus: false
   })
 
+  // Real-time: staff reply arrives on ANY of the user's threads
   useEffect(() => {
     if (!userId) return
-    return subscribeChannel(`chat-${userId}`, 'new-message', (msg) => {
-      // 🔥 FIX: Check for duplicates before adding
-      mutate(CHAT_KEY, prev => {
+    return subscribeChannel(`user-notif-${userId}`, 'chat-reply', ({ threadId }) => {
+      // Refresh the thread list (unread counts change)
+      mutate(THREADS_KEY)
+      // If the active thread got a reply, also refresh its messages
+      if (threadId && threadId === activeThreadId) {
+        mutate(`/chat/threads/${activeThreadId}`)
+      }
+    })
+  }, [userId, activeThreadId])
+
+  // Real-time: new message pushed directly to a thread channel
+  useEffect(() => {
+    if (!activeThreadId) return
+    return subscribeChannel(`chat-${activeThreadId}`, 'new-message', (msg) => {
+      mutate(threadMsgKey, prev => {
         const existing = prev || []
-        // Don't add if message ID already exists
-        if (existing.some(m => m.id === msg.id)) {
-          console.log('🔒 Duplicate message blocked (Pusher):', msg.id)
-          return existing
-        }
+        if (existing.some(m => m.id === msg.id)) return existing
         return [...existing, msg]
       }, false)
+      mutate(THREADS_KEY) // keep thread list fresh
     })
-  }, [userId])
+  }, [activeThreadId, threadMsgKey])
 
-  async function sendMessage(messageText, messageType, library) {
-    if (sendingRef.current) {
-      console.log('🔒 useChat LOCKED - already sending')
+  async function sendMessage(messageText, messageType, library, threadId) {
+    // threadId can be explicitly passed (for new tickets) or defaults to activeThreadId
+    const targetThread = threadId || activeThreadId
+
+    if (sendingRef.current)
       return Promise.reject(new Error('Send already in progress'))
-    }
-
     const now = Date.now()
-    if (now - lastSendTimeRef.current < 1000) {
-      console.log('🔒 useChat LOCKED - debounce (too fast)')
-      return Promise.reject(new Error('Please wait before sending another message'))
-    }
-
-    if (messageQueueRef.current === messageText) {
-      console.log('🔒 useChat LOCKED - duplicate message in queue')
+    if (now - lastSendTimeRef.current < 1000)
+      return Promise.reject(new Error('Please wait before sending'))
+    if (messageQueueRef.current === messageText)
       return Promise.reject(new Error('Message already queued'))
-    }
 
-    sendingRef.current = true
+    sendingRef.current    = true
     lastSendTimeRef.current = now
     messageQueueRef.current = messageText
 
     try {
-      const msg = {
-        threadId: userId,
+      const body = {
+        threadId:    targetThread,
         messageText,
         ...(messageType && { messageType }),
-        ...(library && { library })
+        ...(library    && { library })
       }
-      
-      const res = await api.post('/chat/messages', msg)
-      
-      // 🔥 FIX: Don't add to local state - let Pusher handle it
-      // This prevents the duplicate key error because:
-      // 1. Pusher will broadcast the message
-      // 2. The above useEffect will add it (with duplicate check)
-      // 3. No race condition between optimistic update and Pusher
-      
-      // OLD (caused duplicates):
-      // mutate(CHAT_KEY, prev => [...(prev || []), res.data], false)
-      
+      const res = await api.post('/chat/messages', body)
+
+      // Switch active thread to the newly created/sent-to thread
+      if (targetThread !== activeThreadId) setActiveThreadId(targetThread)
+
+      mutate(THREADS_KEY)
+      if (targetThread) mutate(`/chat/threads/${targetThread}`)
       return res
     } catch (err) {
-      console.error('useChat send error:', err)
       throw err
     } finally {
       setTimeout(() => {
-        sendingRef.current = false
+        sendingRef.current    = false
         messageQueueRef.current = null
       }, 1500)
     }
   }
 
-  return { messages: data || [], loading: isLoading, error, sendMessage }
+  return {
+    threads:        threads  || [],
+    threadsLoading,
+    messages:       messages || [],
+    messagesLoading,
+    activeThreadId,
+    setActiveThreadId,
+    sendMessage
+  }
 }
 </file>
 
@@ -2235,15 +1746,6 @@ export function useDashboardChat() {
         threadId: activeThread,
         messageText: text
       })
-      
-      // 🔥 FIX: Don't add to local state - let Pusher handle it
-      // This prevents the duplicate key error because:
-      // 1. Pusher will broadcast the message
-      // 2. The above useEffect will add it (with duplicate check)
-      // 3. No race condition between optimistic update and Pusher
-      
-      // OLD (caused duplicates):
-      // mutate(threadMsgKey, prev => [...(prev || []), res.data], false)
       
       return res
     } catch (err) {
@@ -2427,81 +1929,6 @@ export function compose(...fns) {
 }
 </file>
 
-<file path="lib/constants.js">
-export const ROLES = { ADMIN: 'admin', CLERK: 'clerk', USER: 'user' }
-
-export const USER_STATUS = { ACTIVE: 'active', INACTIVE: 'inactive', SUSPENDED: 'suspended' }
-
-export const USER_TYPE = { STUDENT: 'student', EMPLOYEE: 'employee' }
-
-export const BORROW_STATUS = {
-  PENDING: 'PENDING', APPROVED: 'APPROVED',
-  REJECTED: 'REJECTED', RETURNED: 'RETURNED'
-}
-
-export const LIBRARY = { HIGH_SCHOOL: 'HIGH_SCHOOL', MAIN_LIBRARY: 'MAIN_LIBRARY' }
-
-export const THREAD_STATUS = { OPEN: 'OPEN', RESOLVED: 'RESOLVED' }
-
-export const MSG_TYPE = { INQUIRY: 'INQUIRY', FEEDBACK: 'FEEDBACK', COMPLAINT: 'COMPLAINT' }
-
-export const NOTIF_TYPE = {
-  BORROW_APPROVED:  'BORROW_APPROVED',
-  BORROW_REJECTED:  'BORROW_REJECTED',
-  BORROW_DUE:       'BORROW_DUE',
-  BORROW_RENEWED:   'BORROW_RENEWED',   // NEW — renewal request notification
-  CHAT_REPLY:       'CHAT_REPLY',
-  ACCOUNT_STATUS:   'ACCOUNT_STATUS'
-}
-
-// Exact Google Sheet tab names
-export const SHEETS = {
-  USERS:         'Users',
-  BOOKS_MAIN:    'Books_MainLibrary',
-  BOOKS_HS:      'Books_HighSchool',
-  BORROWS:       'BorrowRequests',
-  CHAT:          'ChatMessages',
-  NOTIFICATIONS: 'Notifications'
-}
-
-// NOTE: Books col 0 = "Assc. No." (displayed as Accession Number, not "BookID")
-// NOTE: Books col 3 renamed from ISBN → YEAR (publication year); update your Sheet header too
-export const COL = {
-  USERS: {
-    ID:0, NAME:1, EMAIL:2, ROLE:3, DEPT:4,
-    STATUS:5, GOOGLE_ID:6, CREATED:7, LAST_LOGIN:8,
-    USER_TYPE:9, STUDENT_ID:10, YEAR:11, SECTION:12,
-    EMPLOYEE_NUM:13, POSITION:14, OFFICE:15, ASSIGNED_LIBRARY:16,
-    PASSWORD:17
-  },
-  BOOKS: {
-    // Col 0 label in Sheet: "Assc. No."  |  Col 3 label in Sheet: "Year"
-    ID:0, TITLE:1, AUTHOR:2, YEAR:3, CATEGORY:4, LOCATION:5,
-    TOTAL:6, AVAILABLE:7, DESC:8, COVER:9, ADDED_AT:10, ADDED_BY:11
-  },
-  BORROWS: {
-    ID:0, USER_ID:1, BOOK_ID:2, LOCATION:3, STATUS:4,
-    REQ_DATE:5, APPROVAL_DATE:6, DUE_DATE:7, RETURN_DATE:8,
-    PROCESSED_BY:9, NOTES:10
-  },
-  CHAT: {
-    ID:0, THREAD_ID:1, SENDER_ID:2, SENDER_ROLE:3, MSG_TYPE:4,
-    TEXT:5, TIMESTAMP:6, IS_READ:7, THREAD_STATUS:8, LIBRARY_LOCATION:9
-  },
-  NOTIFS: {
-    ID:0, RECIPIENT_ID:1, TYPE:2, TITLE:3, MESSAGE:4,
-    RELATED_ID:5, IS_READ:6, CREATED:7
-  }
-}
-
-export const LETTER = (n) => String.fromCharCode(65 + n)
-
-// Helper: Get correct books sheet name based on library location
-export function getBooksSheet(libraryLocation) {
-  return libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
-}
-</file>
-
 <file path="lib/pusher-client.js">
 import PusherJs from 'pusher-js'
 
@@ -2559,10 +1986,7 @@ export const ch = {
 <file path="lib/queue.js">
 let chain = Promise.resolve()
 
-/**
- * Enqueue an async function to run after all previously enqueued functions.
- * Returns a Promise that resolves/rejects with the result of fn().
- */
+
 export function enqueue(fn) {
   return new Promise((resolve, reject) => {
     chain = chain.then(() => fn().then(resolve).catch(reject))
@@ -3170,203 +2594,8 @@ export default async function handler(req, res) {
 }
 </file>
 
-<file path="pages/api/books/[id].js">
+<file path="pages/api/borrows/[id]/extend.js">
 import Joi from 'joi'
-import { compose }    from '../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
-import { withAuth }   from '../../../middleware/withAuth'
-import { rateLimiter } from '../../../middleware/rateLimiter'
-import * as cache     from '../../../lib/cache'
-import { readSheet, batchUpdate, rowNum, cellRange } from '../../../lib/sheets'
-import { SHEETS, COL, ROLES } from '../../../lib/constants'
-import { getBooks, toBook }   from './index'
-
-const updateSchema = Joi.object({
-  title:         Joi.string().max(255),
-  author:        Joi.string().max(255),
-  year:          Joi.string().max(10).allow(''),   // renamed from isbn
-  category:      Joi.string().max(100),
-  description:   Joi.string().max(1000).allow(''),
-  coverImageUrl: Joi.string().uri().allow(''),
-  totalCopies:   Joi.number().integer().min(1),
-  available:     Joi.number().integer().min(0)
-}).min(1)
-
-async function handlerBook(req, res) {
-  const { id } = req.query
-  const rows   = await getBooks()
-  const book   = rows.find(r => r[COL.BOOKS.ID] === id)
-  if (!book) httpError(404, 'Book not found')
-
-  if (req.method === 'GET')
-    return res.json({ success: true, data: toBook(book) })
-
-  if (req.method === 'PATCH') {
-    if (![ROLES.ADMIN, ROLES.CLERK].includes(req.user.role))
-      httpError(403, 'Forbidden')
-
-    const { error, value } = updateSchema.validate(req.body)
-    if (error) httpError(400, error.details[0].message)
-
-    const location  = book[COL.BOOKS.LOCATION]
-    const sheetName = location === 'HIGH_SCHOOL' ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
-
-    const freshRows = await readSheet(sheetName)
-    const rn = rowNum(freshRows, COL.BOOKS.ID, id)
-    if (rn === -1) httpError(404, 'Book not found')
-
-    const updates = []
-    const map = {
-      title:         COL.BOOKS.TITLE,
-      author:        COL.BOOKS.AUTHOR,
-      year:          COL.BOOKS.YEAR,        // renamed from isbn
-      category:      COL.BOOKS.CATEGORY,
-      description:   COL.BOOKS.DESC,
-      coverImageUrl: COL.BOOKS.COVER,
-      totalCopies:   COL.BOOKS.TOTAL,
-      available:     COL.BOOKS.AVAILABLE
-    }
-    for (const [key, colIdx] of Object.entries(map)) {
-      if (value[key] !== undefined)
-        updates.push({ range: cellRange(sheetName, rn, colIdx), values: [value[key]] })
-    }
-
-    if (updates.length) await batchUpdate(updates)
-    cache.del('books')
-    cache.del(`books_${location}`)
-    return res.json({ success: true, message: 'Book updated' })
-  }
-
-  res.setHeader('Allow', ['GET', 'PATCH'])
-  res.status(405).json({ success: false, error: 'Method not allowed' })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerBook)
-</file>
-
-<file path="pages/api/books/index.js">
-import Joi from 'joi'
-import { v4 as uuid } from 'uuid'
-import { compose }    from '../../../lib/compose'
-import { withErrorHandler } from '../../../middleware/errorHandler'
-import { withAuth }   from '../../../middleware/withAuth'
-import { rateLimiter } from '../../../middleware/rateLimiter'
-import * as cache     from '../../../lib/cache'
-import { SHEETS, COL, ROLES, LIBRARY } from '../../../lib/constants'
-import { readSheet, appendRow, batchRead } from '../../../lib/sheets'
-
-const BOOKS_TTL = parseInt(process.env.CACHE_TTL_BOOKS_MS) || 10 * 60 * 1000
-
-export async function getBooks(libraryLocation = null) {
-  if (!libraryLocation) {
-    const [mainRows, hsRows] = await batchRead([SHEETS.BOOKS_MAIN, SHEETS.BOOKS_HS])
-    const combined = [...mainRows, ...hsRows]
-    cache.set('books', combined, BOOKS_TTL)
-    return combined
-  }
-  const sheetName = libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
-  const cached = cache.get(`books_${libraryLocation}`)
-  if (cached) return cached
-  const rows = await readSheet(sheetName)
-  cache.set(`books_${libraryLocation}`, rows, BOOKS_TTL)
-  return rows
-}
-
-export function toBook(r) {
-  return {
-    id:            r[COL.BOOKS.ID],
-    title:         r[COL.BOOKS.TITLE],
-    author:        r[COL.BOOKS.AUTHOR],
-    year:          r[COL.BOOKS.YEAR],       // renamed from isbn
-    category:      r[COL.BOOKS.CATEGORY],
-    location:      r[COL.BOOKS.LOCATION],
-    totalCopies:   parseInt(r[COL.BOOKS.TOTAL])     || 0,
-    available:     parseInt(r[COL.BOOKS.AVAILABLE]) || 0,
-    description:   r[COL.BOOKS.DESC],
-    coverImageUrl: r[COL.BOOKS.COVER],
-    addedAt:       r[COL.BOOKS.ADDED_AT],
-    addedBy:       r[COL.BOOKS.ADDED_BY]
-  }
-}
-
-const createSchema = Joi.object({
-  title:         Joi.string().max(255).required(),
-  author:        Joi.string().max(255).required(),
-  year:          Joi.string().max(10).optional().allow(''),  // renamed from isbn
-  category:      Joi.string().max(100).required(),
-  location:      Joi.string().valid(...Object.values(LIBRARY)).required(),
-  totalCopies:   Joi.number().integer().min(1).required(),
-  description:   Joi.string().max(1000).optional().allow(''),
-  coverImageUrl: Joi.string().uri().optional().allow('')
-})
-
-async function handler(req, res) {
-  if (req.method === 'GET') {
-    let rows = await getBooks()
-
-    if (req.user.role === ROLES.CLERK) {
-      const assignedLibrary = req.user.assignedLibrary
-      if (!assignedLibrary)
-        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
-      rows = rows.filter(r => r[COL.BOOKS.LOCATION] === assignedLibrary)
-    }
-
-    const { location, category, search } = req.query
-    if (location) rows = rows.filter(r => r[COL.BOOKS.LOCATION] === location.toUpperCase())
-    if (category) rows = rows.filter(r => r[COL.BOOKS.CATEGORY]?.toLowerCase() === category.toLowerCase())
-    if (search) {
-      const q = search.toLowerCase()
-      rows = rows.filter(r =>
-        r[COL.BOOKS.TITLE]?.toLowerCase().includes(q)  ||
-        r[COL.BOOKS.AUTHOR]?.toLowerCase().includes(q) ||
-        r[COL.BOOKS.YEAR]?.includes(q)                 // search by year too
-      )
-    }
-    return res.json({ success: true, data: rows.map(toBook), total: rows.length })
-  }
-
-  if (req.method === 'POST') {
-    if (![ROLES.ADMIN, ROLES.CLERK].includes(req.user.role))
-      return res.status(403).json({ success: false, error: 'Forbidden' })
-
-    const { error, value } = createSchema.validate(req.body)
-    if (error) return res.status(400).json({ success: false, error: error.details[0].message })
-
-    if (req.user.role === ROLES.CLERK) {
-      const assignedLibrary = req.user.assignedLibrary
-      if (!assignedLibrary)
-        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
-      if (value.location !== assignedLibrary)
-        return res.status(403).json({ success: false,
-          error: `You can only add books to ${assignedLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}` })
-    }
-
-    const sheetName = value.location === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
-    const id  = uuid()
-    const now = new Date().toISOString()
-
-    await appendRow(sheetName, [
-      id, value.title, value.author,
-      value.year || '',          // col 3 — was isbn, now year
-      value.category, value.location,
-      value.totalCopies, value.totalCopies,
-      value.description || '', value.coverImageUrl || '',
-      now, req.user.id
-    ])
-
-    cache.del('books')
-    cache.del(`books_${value.location}`)
-    return res.status(201).json({ success: true, data: { id } })
-  }
-
-  res.setHeader('Allow', ['GET', 'POST'])
-  res.status(405).json({ success: false, error: 'Method not allowed' })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
-</file>
-
-<file path="pages/api/borrows/[id]/remind.js">
 import { v4 as uuid } from 'uuid'
 import { compose }     from '../../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
@@ -3374,102 +2603,69 @@ import { withAuth }    from '../../../../middleware/withAuth'
 import { withRole }    from '../../../../middleware/withRole'
 import { rateLimiter } from '../../../../middleware/rateLimiter'
 import { trigger, ch } from '../../../../lib/pusher'
-import { readSheet, appendRow, batchRead } from '../../../../lib/sheets'
+import { readSheet, appendRow, batchUpdate, rowNum, cellRange } from '../../../../lib/sheets'
 import {
-  SHEETS, COL, ROLES, NOTIF_TYPE, THREAD_STATUS, getBooksSheet
+  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS
 } from '../../../../lib/constants'
 
-async function handlerRemind(req, res) {
-  if (req.method !== 'POST')
+const schema = Joi.object({
+  dueDate: Joi.string().isoDate().required()
+})
+
+async function handlerExtend(req, res) {
+  if (req.method !== 'PATCH')
     return res.status(405).json({ success: false, error: 'Method not allowed' })
 
   const { id } = req.query
+  const { error, value } = schema.validate(req.body)
+  if (error) httpError(400, error.details[0].message)
 
-  // Read borrows first to determine which books sheet to use
-  const borrowsRows = await readSheet(SHEETS.BORROWS)
-  const borrow = borrowsRows.find(r => r[COL.BORROWS.ID] === id)
+  const { dueDate } = value
+  const rows   = await readSheet(SHEETS.BORROWS)
+  const borrow = rows.find(r => r[COL.BORROWS.ID] === id)
+
   if (!borrow) httpError(404, 'Borrow request not found')
-  if (borrow[COL.BORROWS.STATUS] !== 'APPROVED')
-    httpError(400, 'Can only send reminders for approved borrows')
+  if (borrow[COL.BORROWS.STATUS] !== BORROW_STATUS.APPROVED)
+    httpError(400, 'Can only extend due date for approved borrows')
 
-  const borrowLocation = borrow[COL.BORROWS.LOCATION]
-  const booksSheetName = getBooksSheet(borrowLocation)   // FIX: use correct sheet
+  // Clerks can only manage their assigned library
+  if (req.user.role === ROLES.CLERK) {
+    if (borrow[COL.BORROWS.LOCATION] !== req.user.assignedLibrary)
+      httpError(403, 'This borrow belongs to a different library')
+  }
 
-  const [users, books] = await batchRead([SHEETS.USERS, booksSheetName])
+  const rn  = rowNum(rows, COL.BORROWS.ID, id)
+  if (rn === -1) httpError(404, 'Borrow row not found')
 
-  const user = users.find(u => u[COL.USERS.ID] === borrow[COL.BORROWS.USER_ID])
-  const book = books.find(b => b[COL.BOOKS.ID] === borrow[COL.BORROWS.BOOK_ID])
-  if (!user) httpError(404, 'User not found')
+  const now  = new Date().toISOString()
+  const note = `Due date extended to ${dueDate} by ${req.user.name} on ${now}`
 
-  const dueDate  = borrow[COL.BORROWS.DUE_DATE]
-  const now      = new Date()
-  const due      = new Date(dueDate)
-  const daysOverdue = Math.floor((now - due) / (1000 * 60 * 60 * 24))
-  const timestamp   = new Date().toISOString()
+  await batchUpdate([
+    { range: cellRange(SHEETS.BORROWS, rn, COL.BORROWS.DUE_DATE), values: [dueDate] },
+    { range: cellRange(SHEETS.BORROWS, rn, COL.BORROWS.NOTES),    values: [note]    }
+  ])
 
-  const bookTitle   = book?.[COL.BOOKS.TITLE] || `Assc. No. ${borrow[COL.BORROWS.BOOK_ID]}`
+  // Notify the borrower
+  const borrowerId = borrow[COL.BORROWS.USER_ID]
   const formattedDue = new Date(dueDate).toLocaleDateString('en-PH', {
     year: 'numeric', month: 'long', day: 'numeric'
   })
 
-  // 1. In-app notification
   await appendRow(SHEETS.NOTIFICATIONS, [
-    uuid(), user[COL.USERS.ID],
-    NOTIF_TYPE.BORROW_DUE,
-    '⚠️ Book Return Reminder',
-    `Your borrowed book "${bookTitle}" is ${daysOverdue} day(s) overdue (due: ${formattedDue}). Please return it as soon as possible.`,
-    id, 'FALSE', timestamp
+    uuid(), borrowerId,
+    NOTIF_TYPE.BORROW_APPROVED,
+    '📅 Due Date Extended',
+    `Great news! Your borrowing due date has been extended to ${formattedDue}.`,
+    id, 'FALSE', now
   ])
 
-  // 2. Chat message from staff into the user's thread — allows the user to reply
-  const chatText = `📚 *Overdue Notice* — Hello! This is a reminder from ${req.user.name} that the book "${bookTitle}" was due on ${formattedDue} and is now ${daysOverdue} day(s) overdue. Please return it to the library at your earliest convenience. If you need an extension, you can reply here. Thank you!`
-  const chatId   = uuid()
-
-  await appendRow(SHEETS.CHAT, [
-    chatId,
-    user[COL.USERS.ID],   // threadId = borrower's userId
-    req.user.id,           // senderId = staff member
-    req.user.role,         // senderRole
-    'INQUIRY',
-    chatText,
-    timestamp,
-    'FALSE',
-    THREAD_STATUS.OPEN,
-    borrowLocation
-  ])
-
-  // 3. Pusher: update borrower's notification badge
-  await trigger(ch.userNotif(user[COL.USERS.ID]), 'overdue-reminder', {
-    title:    '⚠️ Book Return Reminder',
-    message:  `Your book is ${daysOverdue} day(s) overdue`,
-    borrowId: id
+  await trigger(ch.borrowStat(borrowerId), 'status-updated', {
+    requestId: id,
+    status:    BORROW_STATUS.APPROVED,
+    message:   `Your due date has been extended to ${formattedDue}`
   })
 
-  // 4. Pusher: push chat message to borrower's chat channel (live update)
-  await trigger(ch.chat(user[COL.USERS.ID]), 'new-message', {
-    id:          chatId,
-    threadId:    user[COL.USERS.ID],
-    senderId:    req.user.id,
-    senderName:  req.user.name,
-    senderRole:  req.user.role,
-    messageText: chatText,
-    timestamp,
-    libraryLocation: borrowLocation
-  })
-
-  // 5. Pusher: refresh thread list in admin chat console
-  await trigger(ch.adminInbox(borrowLocation), 'new-chat-message', {
-    threadId: user[COL.USERS.ID],
-    userName: user[COL.USERS.NAME],
-    preview:  chatText.substring(0, 80),
-    library:  borrowLocation
-  })
-
-  res.json({
-    success: true,
-    message: 'Reminder sent successfully',
-    data:    { sentTo: user[COL.USERS.EMAIL], daysOverdue, chatSent: true }
-  })
+  res.json({ success: true, message: `Due date extended to ${formattedDue}.` })
 }
 
 export default compose(
@@ -3477,7 +2673,87 @@ export default compose(
   rateLimiter(),
   withAuth,
   withRole(ROLES.ADMIN, ROLES.CLERK)
-)(handlerRemind)
+)(handlerExtend)
+</file>
+
+<file path="pages/api/borrows/[id]/renew.js">
+import { v4 as uuid } from 'uuid'
+import { compose }     from '../../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { rateLimiter } from '../../../../middleware/rateLimiter'
+import { trigger, ch } from '../../../../lib/pusher'
+import { readSheet, appendRow } from '../../../../lib/sheets'
+import {
+  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS, THREAD_STATUS
+} from '../../../../lib/constants'
+
+async function handlerRenew(req, res) {
+  if (req.method !== 'POST')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  if (req.user.role !== ROLES.USER)
+    httpError(403, 'Only borrowers can request renewals')
+
+  const { id } = req.query
+  const borrows = await readSheet(SHEETS.BORROWS)
+  const borrow  = borrows.find(r => r[COL.BORROWS.ID] === id)
+
+  if (!borrow) httpError(404, 'Borrow request not found')
+  if (borrow[COL.BORROWS.USER_ID] !== req.user.id) httpError(403, 'Access denied')
+  if (borrow[COL.BORROWS.STATUS]  !== BORROW_STATUS.APPROVED)
+    httpError(400, 'Can only request renewal for approved borrows')
+
+  const location  = borrow[COL.BORROWS.LOCATION]
+  const bookId    = borrow[COL.BORROWS.BOOK_ID]
+  const dueDate   = borrow[COL.BORROWS.DUE_DATE]
+  const timestamp = new Date().toISOString()
+
+  const formattedDue = dueDate
+    ? new Date(dueDate).toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })
+    : 'N/A'
+
+  // Message posted to the user's own chat thread so staff can see & respond
+  const chatText = `📖 Renewal Request — Hi! I would like to request a renewal for Assc. No. ${bookId}. Current due date: ${formattedDue}. Please let me know if it can be extended. Thank you!`
+
+  const chatId = uuid()
+  await appendRow(SHEETS.CHAT, [
+    chatId,
+    req.user.id,        // threadId = userId
+    req.user.id,        // senderId
+    ROLES.USER,         // senderRole
+    'INQUIRY',          // messageType
+    chatText,
+    timestamp,
+    'FALSE',
+    THREAD_STATUS.OPEN,
+    location
+  ])
+
+  // Real-time: update user's own chat page
+  await trigger(ch.chat(req.user.id), 'new-message', {
+    id:          chatId,
+    threadId:    req.user.id,
+    senderId:    req.user.id,
+    senderName:  req.user.name,
+    senderRole:  ROLES.USER,
+    messageText: chatText,
+    timestamp,
+    libraryLocation: location
+  })
+
+  // Real-time: notify admin inbox (thread list refresh)
+  await trigger(ch.adminInbox(location), 'new-chat-message', {
+    threadId: req.user.id,
+    userName: req.user.name,
+    preview:  chatText.substring(0, 80),
+    library:  location
+  })
+
+  res.json({ success: true, message: 'Renewal request sent to library staff.' })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerRenew)
 </file>
 
 <file path="pages/api/borrows/[id]/status.js">
@@ -3773,17 +3049,14 @@ const schema = Joi.object({
   library:     Joi.string().valid(...Object.values(LIBRARY)).optional()
 })
 
-// 🔥 IN-MEMORY DUPLICATE DETECTION CACHE
-const recentMessages = new Map() // Key: `${threadId}:${userId}:${messageText}`, Value: timestamp
-const DUPLICATE_WINDOW = 5000 // 5 seconds
+// In-memory duplicate detection
+const recentMessages = new Map()
+const DUPLICATE_WINDOW = 5000
 
-// 🔥 CLEANUP OLD ENTRIES EVERY 10 SECONDS
 setInterval(() => {
   const now = Date.now()
-  for (const [key, timestamp] of recentMessages.entries()) {
-    if (now - timestamp > DUPLICATE_WINDOW) {
-      recentMessages.delete(key)
-    }
+  for (const [key, ts] of recentMessages.entries()) {
+    if (now - ts > DUPLICATE_WINDOW) recentMessages.delete(key)
   }
 }, 10000)
 
@@ -3797,52 +3070,46 @@ async function handler(req, res) {
   const { threadId, messageText, messageType, library } = value
   const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
 
-  if (!isStaff && threadId !== req.user.id)
-    httpError(403, 'You can only send messages in your own thread')
+  // For users: verify they own the thread (have previously sent to it)
+  // For staff: no restriction — they can reply to any thread
+  if (!isStaff) {
+    const rows = await readSheet(SHEETS.CHAT)
+    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
+    if (threadRows.length > 0) {
+      // Existing thread — must be the owner
+      const isOwner = threadRows.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+      if (!isOwner) httpError(403, 'You can only send messages in your own threads')
+    }
+    // threadRows.length === 0 means this is a brand new thread — allow it
+  }
 
-  // 🔥 DUPLICATE DETECTION - Check if same message was sent recently
-  const duplicateKey = `${threadId}:${req.user.id}:${messageText.trim()}`
-  const lastSent = recentMessages.get(duplicateKey)
-  const now = Date.now()
-  
+  // Duplicate detection
+  const dupKey  = `${threadId}:${req.user.id}:${messageText.trim()}`
+  const lastSent = recentMessages.get(dupKey)
+  const now      = Date.now()
+
   if (lastSent && (now - lastSent) < DUPLICATE_WINDOW) {
-    console.log('🔒 SERVER BLOCKED DUPLICATE:', duplicateKey)
-    // Return success to prevent client retries, but don't actually save
-    return res.status(200).json({ 
-      success: true, 
+    console.log('Server blocked duplicate:', dupKey)
+    return res.status(200).json({
+      success: true,
       message: 'Duplicate message blocked',
       data: { id: 'DUPLICATE_BLOCKED' }
     })
   }
-
-  // 🔥 RECORD THIS MESSAGE
-  recentMessages.set(duplicateKey, now)
+  recentMessages.set(dupKey, now)
 
   // Determine library location
   let libraryLocation = library || LIBRARY.MAIN_LIBRARY
-  
-  if (isStaff) {
-    libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
-  } else {
-    // Staff replying - use their assigned library
-    libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
-  }
+  if (isStaff) libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
 
-  const msgId = uuid()
-  const timestamp = new Date().toISOString()
+  const msgId       = uuid()
+  const timestamp   = new Date().toISOString()
   const threadStatus = THREAD_STATUS.OPEN
 
   await appendRow(SHEETS.CHAT, [
-    msgId,
-    threadId,
-    req.user.id,
-    req.user.role,
-    messageType || '',
-    messageText,
-    timestamp,
-    'FALSE',
-    threadStatus,
-    libraryLocation
+    msgId, threadId, req.user.id, req.user.role,
+    messageType || '', messageText,
+    timestamp, 'FALSE', threadStatus, libraryLocation
   ])
 
   const payload = {
@@ -3856,24 +3123,38 @@ async function handler(req, res) {
     libraryLocation
   }
 
-  // Broadcast to thread channel
+  // Broadcast to thread channel (both user + staff subscribe to this)
   await trigger(ch.chat(threadId), 'new-message', payload)
 
   if (isStaff) {
-    await trigger(ch.userNotif(threadId), 'chat-reply', {
-      title:   'New reply from library staff',
-      message: messageText.substring(0, 80)
-    })
-    await appendRow(SHEETS.NOTIFICATIONS, [
-      uuid(), threadId, NOTIF_TYPE.CHAT_REPLY,
-      'Library Staff Replied',
-      `Staff replied: "${messageText.substring(0, 60)}${messageText.length > 60 ? '…' : ''}"`,
-      msgId, 'FALSE', timestamp
-    ])
+    // Find the thread owner (first user-role sender)
+    const rows = await readSheet(SHEETS.CHAT)
+    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
+    const ownerRow   = threadRows.find(r => r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+    const ownerId    = ownerRow?.[COL.CHAT.SENDER_ID]
+
+    if (ownerId) {
+      // Notify the user
+      await trigger(ch.userNotif(ownerId), 'chat-reply', {
+        threadId,
+        title:   'New reply from library staff',
+        message: messageText.substring(0, 80)
+      })
+      await appendRow(SHEETS.NOTIFICATIONS, [
+        uuid(), ownerId, NOTIF_TYPE.CHAT_REPLY,
+        'Library Staff Replied',
+        `Staff replied: "${messageText.substring(0, 60)}${messageText.length > 60 ? '…' : ''}"`,
+        msgId, 'FALSE', timestamp
+      ])
+    }
   } else {
+    // User sent — notify admin/clerk inbox
     await trigger(ch.adminInbox(libraryLocation), 'new-chat-message', {
-      threadId, userName: req.user.name, preview: messageText.substring(0, 80),
-      library: libraryLocation
+      threadId,
+      userId:   req.user.id,
+      userName: req.user.name,
+      preview:  messageText.substring(0, 80),
+      library:  libraryLocation
     })
   }
 
@@ -3888,7 +3169,7 @@ import { compose }     from '../../../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../../../middleware/errorHandler'
 import { withAuth }    from '../../../../../middleware/withAuth'
 import { rateLimiter } from '../../../../../middleware/rateLimiter'
-import { readSheet, batchUpdate, rowNum, cellRange } from '../../../../../lib/sheets'
+import { readSheet, batchUpdate, cellRange } from '../../../../../lib/sheets'
 import { SHEETS, COL, ROLES } from '../../../../../lib/constants'
 
 export function toMessage(r) {
@@ -3912,44 +3193,33 @@ async function handlerThread(req, res) {
   const { threadId } = req.query
   const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
 
-  // Users can only read their own thread
-  if (!isStaff && threadId !== req.user.id)
-    httpError(403, 'Access denied')
-
   const rows = await readSheet(SHEETS.CHAT)
   let msgs = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
-  
   if (!msgs.length) httpError(404, 'Thread not found')
 
-  // 🔧 FIX: More permissive library filtering for clerks
-  if (req.user.role === ROLES.CLERK) {
-    const assignedLibrary = req.user.assignedLibrary
-    
-    // If clerk has NO assigned library, deny access entirely
-    if (!assignedLibrary) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'No library assigned to your account. Please contact admin.' 
-      })
-    }
-    
-    // Check thread library (use first message's library location)
-    const threadLibrary = msgs[0]?.[COL.CHAT.LIBRARY_LOCATION]
-    
-    // 🔧 FIX: Only deny if thread has a library AND it doesn't match
-    // If threadLibrary is empty/undefined, allow access (legacy threads)
-    if (threadLibrary && threadLibrary !== assignedLibrary) {
-      return res.status(403).json({
-        success: false,
-        error: `This conversation belongs to ${threadLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}. You are assigned to ${assignedLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}.`
-      })
-    }
+  // Users: verify ownership via senderId (works for UUID threads too)
+  if (!isStaff) {
+    const isOwner = msgs.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+    if (!isOwner) httpError(403, 'Access denied')
   }
 
-  // Mark messages as read (for staff viewing)
+  // Clerks: library-based filtering
+  if (req.user.role === ROLES.CLERK) {
+    const assignedLibrary = req.user.assignedLibrary
+    if (!assignedLibrary)
+      return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
+    const threadLibrary = msgs[0]?.[COL.CHAT.LIBRARY_LOCATION]
+    if (threadLibrary && threadLibrary !== assignedLibrary)
+      return res.status(403).json({
+        success: false,
+        error: `This conversation belongs to a different library.`
+      })
+  }
+
+  // Mark messages as read (staff viewing user messages)
   if (isStaff) {
     const unread = msgs
-      .map((r, i) => ({ r, sheetRow: rows.indexOf(r) + 2 }))
+      .map((r, _) => ({ r, sheetRow: rows.indexOf(r) + 2 }))
       .filter(({ r }) => r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
 
     if (unread.length) {
@@ -3982,6 +3252,7 @@ async function handlerResolve(req, res) {
 
   const { threadId } = req.query
   const rows = await readSheet(SHEETS.CHAT)
+
   const threadRows = rows
     .map((r, i) => ({ r, sheetRow: i + 2 }))
     .filter(({ r }) => r[COL.CHAT.THREAD_ID] === threadId)
@@ -4017,52 +3288,46 @@ async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' })
 
   const rows = await readSheet(SHEETS.CHAT)
-
-  // Group by threadId
   const threadMap = new Map()
+
   for (const r of rows) {
-    const tid = r[COL.CHAT.THREAD_ID]
+    const tid        = r[COL.CHAT.THREAD_ID]
     const msgLibrary = r[COL.CHAT.LIBRARY_LOCATION]
-    
-    // LIBRARY-BASED FILTERING FOR CLERKS
+
     if (req.user.role === ROLES.CLERK) {
       const assignedLibrary = req.user.assignedLibrary
-      if (!assignedLibrary) {
-        return res.status(403).json({ 
-          success: false, 
-          error: 'No library assigned to your account. Please contact admin.' 
-        })
-      }
-      // Skip messages from other libraries
+      if (!assignedLibrary)
+        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
       if (msgLibrary && msgLibrary !== assignedLibrary) continue
     }
-    // Admins see all threads (no filter)
 
-    if (!threadMap.has(tid)) {
-      threadMap.set(tid, { threadId: tid, messages: [], unread: 0 })
-    }
+    if (!threadMap.has(tid)) threadMap.set(tid, { threadId: tid, messages: [], unread: 0 })
     const t = threadMap.get(tid)
     t.messages.push(r)
-    if (r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER) {
-      t.unread++
-    }
+    if (r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER) t.unread++
   }
 
   const threads = [...threadMap.values()].map(t => {
     const last = t.messages[t.messages.length - 1]
+
+    // userId = first user-role sender — works for both old (threadId=userId)
+    // and new (threadId=UUID) style threads
+    const firstUserMsg = t.messages.find(m => m[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+    const userId = firstUserMsg?.[COL.CHAT.SENDER_ID] || t.threadId
+
     return {
       threadId:      t.threadId,
+      userId,                          // used by ThreadList for name lookup
       lastMessage:   last[COL.CHAT.TEXT],
       lastTimestamp: last[COL.CHAT.TIMESTAMP],
       threadStatus:  last[COL.CHAT.THREAD_STATUS],
       unreadCount:   t.unread,
       messageType:   t.messages[0][COL.CHAT.MSG_TYPE],
-      library:       last[COL.CHAT.LIBRARY_LOCATION]  // Include library info
+      library:       last[COL.CHAT.LIBRARY_LOCATION]
     }
   })
 
   threads.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp))
-
   res.json({ success: true, data: threads, total: threads.length })
 }
 
@@ -4077,19 +3342,51 @@ import { withErrorHandler } from '../../../../middleware/errorHandler'
 import { withAuth }    from '../../../../middleware/withAuth'
 import { rateLimiter } from '../../../../middleware/rateLimiter'
 import { readSheet }   from '../../../../lib/sheets'
-import { SHEETS, COL } from '../../../../lib/constants'
-import { toMessage }   from './[threadId]/index'
+import { SHEETS, COL, ROLES } from '../../../../lib/constants'
 
 async function handlerMe(req, res) {
   if (req.method !== 'GET')
     return res.status(405).json({ success: false, error: 'Method not allowed' })
 
   const rows = await readSheet(SHEETS.CHAT)
-  const mine = rows
-    .filter(r => r[COL.CHAT.THREAD_ID] === req.user.id)
-    .map(toMessage)
 
-  res.json({ success: true, data: mine, total: mine.length })
+  // Find all threadIds where this user has sent at least one message
+  const myThreadIds = new Set(
+    rows
+      .filter(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+      .map(r => r[COL.CHAT.THREAD_ID])
+  )
+
+  // Group all rows for those threads
+  const threadMap = new Map()
+  for (const r of rows) {
+    const tid = r[COL.CHAT.THREAD_ID]
+    if (!myThreadIds.has(tid)) continue
+    if (!threadMap.has(tid)) threadMap.set(tid, [])
+    threadMap.get(tid).push(r)
+  }
+
+  const threads = [...threadMap.entries()].map(([tid, msgs]) => {
+    const last         = msgs[msgs.length - 1]
+    const firstUserMsg = msgs.find(m => m[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+    // Unread = messages NOT sent by this user that they haven't read
+    const unreadCount  = msgs.filter(m =>
+      m[COL.CHAT.IS_READ] === 'FALSE' && m[COL.CHAT.SENDER_ID] !== req.user.id
+    ).length
+
+    return {
+      threadId:      tid,
+      lastMessage:   last[COL.CHAT.TEXT],
+      lastTimestamp: last[COL.CHAT.TIMESTAMP],
+      threadStatus:  last[COL.CHAT.THREAD_STATUS],
+      messageType:   firstUserMsg?.[COL.CHAT.MSG_TYPE] || '',
+      library:       last[COL.CHAT.LIBRARY_LOCATION] || '',
+      unreadCount
+    }
+  })
+
+  threads.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp))
+  res.json({ success: true, data: threads, total: threads.length })
 }
 
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
@@ -5180,352 +4477,6 @@ export async function getServerSideProps(ctx) {
 }
 </file>
 
-<file path="pages/chat.jsx">
-import { useRef, useEffect, useState } from 'react'
-import { useSession }   from 'next-auth/react'
-import { useRouter }    from 'next/router'
-import MessageBubble    from '../components/chat/MessageBubble'
-import Spinner          from '../components/ui/Spinner'
-import Toast            from '../components/ui/Toast'
-import { useChat }      from '../hooks/useChat'
-import { useNotifications } from '../hooks/useNotifications'
-import api              from '../lib/api'
-
-const MSG_TYPES = [
-  { id: 'INQUIRY',   label: '🔍 Inquiry',   desc: 'Ask about books or services' },
-  { id: 'FEEDBACK',  label: '💬 Feedback',  desc: 'Share your experience' },
-  { id: 'COMPLAINT', label: '⚠️ Complaint', desc: 'Report an issue' }
-]
-
-const LIBRARIES = [
-  { id: 'HIGH_SCHOOL',  label: '🏫 High School Library', desc: 'For HS students and faculty' },
-  { id: 'MAIN_LIBRARY', label: '📚 Main Library',        desc: 'For college departments' }
-]
-
-export default function ChatPage() {
-  const router  = useRouter()
-  const { data: session }  = useSession()
-  const { messages, loading, sendMessage } = useChat()
-  const { notifications, markRead }        = useNotifications()
-
-  const [msgType,    setMsgType]    = useState(null)
-  const [library,    setLibrary]    = useState(null)
-  const [toast,      setToast]      = useState(null)
-  const [text,       setText]       = useState('')
-  const bottomRef                   = useRef(null)
-  const textareaRef                 = useRef(null)
-  const submitLockRef               = useRef(false)
-  const lastSubmitRef               = useRef(0)
-  const [isSending,  setIsSending]  = useState(false)
-  const userId = session?.user?.id
-
-  // Auto-scroll
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
-
-  // AUTO-CLEAR chat-reply notifications when user opens this page
-  useEffect(() => {
-    if (!notifications.length) return
-    notifications
-      .filter(n => !n.isRead && n.type === 'CHAT_REPLY')
-      .forEach(n => markRead(n.id))
-  // Run once on mount + whenever new notifications arrive
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notifications.length])
-
-  const hasMessages = messages.length > 0
-  const isResolved  = hasMessages && messages[messages.length - 1]?.threadStatus === 'RESOLVED'
-
-  async function handleSend() {
-    const trimmedText = text.trim()
-    if (!trimmedText) return
-    if (submitLockRef.current || isSending || isResolved) return
-    const now = Date.now()
-    if (now - lastSubmitRef.current < 1000) return
-    if (!hasMessages && (!msgType || !library)) {
-      setToast({ message: 'Please select library and message type', type: 'error' })
-      return
-    }
-
-    submitLockRef.current = true
-    setIsSending(true)
-    lastSubmitRef.current = now
-    const msg = trimmedText
-    setText('')
-
-    try {
-      await sendMessage(msg, !hasMessages ? msgType : undefined, library)
-    } catch (err) {
-      if (!err.message?.includes('progress')) {
-        setText(msg)
-        setToast({ message: err.message || 'Failed to send.', type: 'error' })
-      }
-    } finally {
-      setTimeout(() => { submitLockRef.current = false; setIsSending(false) }, 1500)
-      textareaRef.current?.focus()
-    }
-  }
-
-  // NEW CONVERSATION — posts first message to a fresh thread
-  // Achieved by calling sendMessage with fresh msgType + library (user selects again)
-  const [showNewConv, setShowNewConv] = useState(false)
-  const [newMsgType,  setNewMsgType]  = useState(null)
-  const [newLibrary,  setNewLibrary]  = useState(null)
-  const [newText,     setNewText]     = useState('')
-  const [startingNew, setStartingNew] = useState(false)
-
-  async function handleStartNew() {
-    if (!newText.trim() || !newMsgType || !newLibrary) {
-      setToast({ message: 'Please fill in all fields', type: 'error' })
-      return
-    }
-    setStartingNew(true)
-    try {
-      // Re-open the thread by sending a new message with type + library
-      await api.post('/chat/messages', {
-        threadId:    userId,
-        messageText: newText.trim(),
-        messageType: newMsgType,
-        library:     newLibrary
-      })
-      setShowNewConv(false)
-      setNewText('')
-      setNewMsgType(null)
-      setNewLibrary(null)
-      // SWR will revalidate and show the new message
-    } catch (err) {
-      setToast({ message: err.message || 'Failed to start conversation.', type: 'error' })
-    } finally {
-      setStartingNew(false)
-    }
-  }
-
-  function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      e.stopPropagation()
-      if (!submitLockRef.current && !isSending) handleSend()
-    }
-  }
-
-  const canSend = text.trim() && !submitLockRef.current && !isSending && !isResolved &&
-    (hasMessages || (msgType && library))
-
-  return (
-    <div className="min-h-screen bg-green-50 flex flex-col safe-top">
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
-
-      {/* Top bar */}
-      <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30">
-        <button onClick={() => router.back()}
-          className="p-1 rounded-full hover:bg-green-700 transition">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <div className="w-9 h-9 rounded-full bg-green-600 flex items-center justify-center">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round"
-              d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13"/>
-          </svg>
-        </div>
-        <div>
-          <p className="font-semibold text-sm">Library Support</p>
-          <p className="text-green-300 text-xs">
-            {isResolved ? '✔ Resolved' : hasMessages ? '🟢 Active conversation' : 'Start a conversation'}
-          </p>
-        </div>
-      </header>
-
-      {/* First-message selector */}
-      {!hasMessages && !loading && (
-        <div className="px-4 pt-4 max-w-lg mx-auto w-full">
-          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">Select library</p>
-          <div className="grid grid-cols-2 gap-2 mb-4">
-            {LIBRARIES.map(lib => (
-              <button key={lib.id} onClick={() => setLibrary(lib.id)} disabled={isSending}
-                className={`p-3 rounded-xl border-2 text-left transition
-                  ${library === lib.id ? 'border-green-600 bg-green-50' : 'border-gray-200 bg-white hover:border-green-300'}
-                  ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}>
-                <div className="flex items-center gap-2">
-                  <span className="text-lg">{lib.label.split(' ')[0]}</span>
-                  <div>
-                    <p className={`text-xs font-semibold ${library === lib.id ? 'text-green-700' : 'text-gray-700'}`}>
-                      {lib.label.split(' ').slice(1).join(' ')}
-                    </p>
-                    <p className="text-[10px] text-gray-400 mt-0.5">{lib.desc}</p>
-                  </div>
-                </div>
-              </button>
-            ))}
-          </div>
-
-          <p className="text-xs font-semibold text-green-700 mb-2 uppercase tracking-wide">Message type</p>
-          <div className="grid grid-cols-3 gap-2 mb-4">
-            {MSG_TYPES.map(t => (
-              <button key={t.id} onClick={() => setMsgType(t.id)} disabled={isSending}
-                className={`p-2.5 rounded-xl border-2 text-center transition
-                  ${msgType === t.id ? 'border-green-600 bg-green-50' : 'border-gray-200 bg-white hover:border-green-300'}
-                  ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}>
-                <span className="text-base block">{t.label.split(' ')[0]}</span>
-                <span className={`text-[10px] font-semibold block mt-0.5
-                  ${msgType === t.id ? 'text-green-700' : 'text-gray-500'}`}>
-                  {t.label.split(' ')[1]}
-                </span>
-              </button>
-            ))}
-          </div>
-          <p className="text-xs text-gray-400 text-center">
-            {library && msgType
-              ? `You're contacting ${LIBRARIES.find(l => l.id === library)?.label.split(' ').slice(1).join(' ')}`
-              : 'Select both library and message type to continue'}
-          </p>
-        </div>
-      )}
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 pt-4 pb-4 max-w-lg mx-auto w-full chat-scroll">
-        {loading ? <Spinner/> : !hasMessages
-          ? (
-            <div className="flex flex-col items-center justify-center h-48 text-center">
-              <span className="text-4xl mb-3">💬</span>
-              <p className="text-green-800 font-semibold text-sm">No messages yet</p>
-              <p className="text-gray-400 text-xs mt-1">Send your first message to get started.</p>
-            </div>
-          ) : (
-            <>
-              <div className="bg-green-100 rounded-xl px-3 py-2 mb-4 text-center">
-                <p className="text-xs text-green-700">
-                  💡 Library staff will reply as soon as possible.
-                </p>
-              </div>
-              {messages.map(msg => (
-                <MessageBubble key={msg.id} msg={msg} isOwn={msg.senderId === userId}/>
-              ))}
-              {isResolved && (
-                <div className="text-center my-4 space-y-3">
-                  <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full inline-block">
-                    ✔ This conversation has been resolved
-                  </span>
-                  {/* NEW CONVERSATION BUTTON */}
-                  {!showNewConv && (
-                    <div>
-                      <button
-                        onClick={() => setShowNewConv(true)}
-                        className="bg-green-700 hover:bg-green-800 text-white text-xs
-                          font-semibold px-4 py-2 rounded-xl transition">
-                        + Start New Conversation
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* New conversation form (shown after clicking the button) */}
-              {isResolved && showNewConv && (
-                <div className="bg-white rounded-2xl border border-green-200 p-4 mt-2 space-y-3">
-                  <p className="text-xs font-bold text-green-800 uppercase tracking-wide">
-                    New Conversation
-                  </p>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {LIBRARIES.map(lib => (
-                      <button key={lib.id} onClick={() => setNewLibrary(lib.id)}
-                        className={`p-2 rounded-xl border-2 text-xs font-semibold transition
-                          ${newLibrary === lib.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
-                        {lib.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2">
-                    {MSG_TYPES.map(t => (
-                      <button key={t.id} onClick={() => setNewMsgType(t.id)}
-                        className={`p-2 rounded-xl border-2 text-xs font-semibold transition
-                          ${newMsgType === t.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <textarea
-                    value={newText}
-                    onChange={e => setNewText(e.target.value)}
-                    rows={3}
-                    placeholder="Type your message…"
-                    className="w-full border border-green-200 rounded-xl px-3 py-2 text-sm
-                      focus:outline-none focus:ring-2 focus:ring-green-500 resize-none bg-green-50"
-                  />
-
-                  <div className="flex gap-2">
-                    <button onClick={() => { setShowNewConv(false); setNewText('') }}
-                      className="flex-1 border-2 border-gray-200 text-gray-600 text-xs
-                        font-semibold py-2 rounded-xl hover:bg-gray-50 transition">
-                      Cancel
-                    </button>
-                    <button onClick={handleStartNew} disabled={startingNew || !newText.trim() || !newMsgType || !newLibrary}
-                      className="flex-1 bg-green-700 text-white text-xs font-semibold py-2
-                        rounded-xl hover:bg-green-800 transition disabled:opacity-50">
-                      {startingNew ? 'Sending…' : '✔ Send'}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div ref={bottomRef}/>
-            </>
-          )
-        }
-      </div>
-
-      {/* Input bar — hidden when resolved */}
-      {!isResolved && (
-        <form onSubmit={e => { e.preventDefault(); e.stopPropagation() }}
-          className="sticky bottom-0 w-full max-w-lg mx-auto bg-white border-t border-green-100 px-4 py-3">
-          <div className="flex gap-2 items-end">
-            <textarea
-              ref={textareaRef}
-              value={text}
-              onChange={e => setText(e.target.value)}
-              onKeyDown={handleKeyDown}
-              rows={1}
-              disabled={isSending}
-              placeholder={hasMessages ? 'Type a message…' : 'Select library and type above first'}
-              className="flex-1 resize-none border border-green-200 rounded-xl px-3 py-2 text-sm
-                focus:outline-none focus:ring-2 focus:ring-green-500 max-h-28 bg-green-50
-                placeholder-gray-400 disabled:opacity-50 disabled:cursor-not-allowed"
-              style={{ overflowY: text.split('\n').length > 3 ? 'auto' : 'hidden' }}
-            />
-            <button onClick={handleSend} disabled={!canSend} type="button"
-              className="w-10 h-10 rounded-xl bg-green-700 text-white flex items-center
-                justify-center disabled:opacity-40 hover:bg-green-800 transition flex-shrink-0">
-              {isSending
-                ? <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
-                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
-                    <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
-                  </svg>
-                : <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
-                  </svg>
-              }
-            </button>
-          </div>
-        </form>
-      )}
-    </div>
-  )
-}
-
-export async function getServerSideProps(ctx) {
-  const { getServerSession } = await import('next-auth/next')
-  const { authOptions }      = await import('./api/auth/[...nextauth]')
-  const session = await getServerSession(ctx.req, ctx.res, authOptions)
-  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
-  return { props: {} }
-}
-</file>
-
 <file path="pages/dashboard.jsx">
 import { useSession }       from 'next-auth/react'
 import Link                 from 'next/link'
@@ -5677,194 +4628,6 @@ export default function ForbiddenPage() {
     </div>
   )
 }
-</file>
-
-<file path="pages/dashboard/borrows.jsx">
-import { useState } from 'react'
-import DashboardLayout from '../../components/layout/DashboardLayout'
-import BorrowFilters   from '../../components/borrows/BorrowFilters'
-import BorrowsTable    from '../../components/borrows/BorrowsTable'
-import OverduePanel    from '../../components/borrows/OverduePanel'
-import ApproveModal    from '../../components/borrows/ApproveModal'
-import RejectModal     from '../../components/borrows/RejectModal'
-import Modal           from '../../components/ui/Modal'
-import Spinner         from '../../components/ui/Spinner'
-import EmptyState      from '../../components/ui/EmptyState'
-import Toast           from '../../components/ui/Toast'
-import { useDashboardBorrows } from '../../hooks/useDashboardBorrows'
-import { useDashboardUsers }   from '../../hooks/useDashboardUsers'
-import { withDashboardAuth }   from '../../components/guards/withDashboardAuth'
-import useSWR from 'swr'
-import api    from '../../lib/api'
-
-export default function BorrowsPage() {
-  const { borrows, loading, approveBorrow, rejectBorrow, returnBorrow } = useDashboardBorrows()
-  const { users }  = useDashboardUsers()
-  const { data: books = [] } = useSWR('/books', url => api.get(url).then(d => d.data))
-
-  const [filters,       setFilters]  = useState({ status: 'ALL', library: 'ALL', search: '' })
-  const [approveTarget, setApprove]  = useState(null)
-  const [rejectTarget,  setReject]   = useState(null)
-  const [returnTarget,  setReturn]   = useState(null)
-  const [actionLoading, setActLoad]  = useState(false)
-  const [toast,         setToast]    = useState(null)
-  const [showOverdue,   setOverdue]  = useState(false)
-
-  function showToast(msg, type = 'success') { setToast({ message: msg, type }) }
-  function patchFilter(patch) { setFilters(prev => ({ ...prev, ...patch })) }
-
-  // Client-side filter
-  let filtered = [...borrows]
-  if (filters.status  !== 'ALL') filtered = filtered.filter(b => b.status   === filters.status)
-  if (filters.library !== 'ALL') filtered = filtered.filter(b => b.location === filters.library)
-  if (filters.search) {
-    const q = filters.search.toLowerCase()
-    filtered = filtered.filter(b =>
-      b.userId?.toLowerCase().includes(q) || b.bookId?.toLowerCase().includes(q)
-    )
-  }
-  filtered.sort((a, b) => new Date(b.requestDate) - new Date(a.requestDate))
-
-  // Count overdue for badge
-  const overdueCount = borrows.filter(b => {
-    if (b.status !== 'APPROVED' || !b.dueDate) return false
-    return Date.now() > new Date(b.dueDate).getTime()
-  }).length
-
-  async function handleSendReminder(borrowId) {
-    setActLoad(true)
-    try {
-      await api.post(`/borrows/${borrowId}/remind`)
-      showToast('Reminder sent and posted to borrower chat!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleExtend(borrowId, dueDate) {
-    setActLoad(true)
-    try {
-      await api.patch(`/borrows/${borrowId}/extend`, { dueDate })
-      showToast('Due date extended successfully!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleApprove(id, dueDate) {
-    setActLoad(true)
-    try {
-      await approveBorrow(id, dueDate)
-      setApprove(null)
-      showToast('Request approved successfully!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleReject(id, notes) {
-    setActLoad(true)
-    try {
-      await rejectBorrow(id, notes)
-      setReject(null)
-      showToast('Request rejected.')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleReturn(id) {
-    setActLoad(true)
-    try {
-      await returnBorrow(id)
-      setReturn(null)
-      showToast('Book marked as returned!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  return (
-    <DashboardLayout title="Borrow Management">
-      {toast && <Toast {...toast} onClose={() => setToast(null)}/>}
-
-      {/* View toggle */}
-      <div className="flex gap-3 mb-5">
-        <button onClick={() => setOverdue(false)}
-          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
-            ${!showOverdue
-              ? 'bg-green-700 text-white'
-              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'}`}>
-          📋 All Requests
-        </button>
-        <button onClick={() => setOverdue(true)}
-          className={`relative flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
-            ${showOverdue
-              ? 'bg-red-600 text-white'
-              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'}`}>
-          ⚠️ Overdue Books
-          {overdueCount > 0 && (
-            <span className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-[10px] font-bold
-              flex items-center justify-center
-              ${showOverdue ? 'bg-white text-red-600' : 'bg-red-500 text-white'}`}>
-              {overdueCount > 9 ? '9+' : overdueCount}
-            </span>
-          )}
-        </button>
-      </div>
-
-      {showOverdue ? (
-        loading ? <Spinner/> : (
-          <OverduePanel
-            borrows={borrows}
-            users={users}
-            books={books}
-            onSendReminder={handleSendReminder}
-            onExtend={handleExtend}
-          />
-        )
-      ) : (
-        <>
-          <BorrowFilters {...filters} onChange={patchFilter}/>
-          {loading ? <Spinner/> : filtered.length === 0
-            ? <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters."/>
-            : <BorrowsTable
-                borrows={filtered} users={users} books={books}
-                onApprove={b => setApprove(b)}
-                onReject={b  => setReject(b)}
-                onReturn={b  => setReturn(b)}
-              />
-          }
-        </>
-      )}
-
-      <ApproveModal open={!!approveTarget} borrow={approveTarget}
-        loading={actionLoading} onConfirm={handleApprove} onClose={() => setApprove(null)}/>
-
-      <RejectModal open={!!rejectTarget} borrow={rejectTarget}
-        loading={actionLoading} onConfirm={handleReject} onClose={() => setReject(null)}/>
-
-      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✔ Confirm Return">
-        <div className="space-y-4">
-          <p className="text-sm text-gray-600">
-            Mark borrow request{' '}
-            <span className="font-mono font-semibold">{returnTarget?.id?.slice(0, 8)}…</span> as
-            returned? This will restore the book's available copy count.
-          </p>
-          <div className="flex gap-3 pt-2">
-            <button onClick={() => setReturn(null)} disabled={actionLoading}
-              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
-                py-2.5 rounded-xl hover:bg-gray-50 transition">
-              Cancel
-            </button>
-            <button onClick={() => handleReturn(returnTarget.id)} disabled={actionLoading}
-              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
-                hover:bg-blue-700 transition disabled:opacity-50">
-              {actionLoading ? 'Confirming…' : '✔ Confirm Return'}
-            </button>
-          </div>
-        </div>
-      </Modal>
-    </DashboardLayout>
-  )
-}
-
-export const getServerSideProps = withDashboardAuth()
 </file>
 
 <file path="pages/dashboard/chat.jsx">
@@ -7771,9 +6534,9 @@ To learn more about Next.js, take a look at the following resources:
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
 
-## Deploy on Vercel
+## Deploy on Render
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The easiest way to deploy your Next.js app is to use the [Render Platform](https://Render.com) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
 </file>
@@ -8046,6 +6809,442 @@ node_modules/
 .DS_Store
 </file>
 
+<file path="components/borrow/BorrowCard.jsx">
+import { useState }  from 'react'
+import StatusBadge    from '../ui/StatusBadge'
+import Toast          from '../ui/Toast'
+import { fmtDate }    from '../../lib/utils'
+import api            from '../../lib/api'
+
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
+}
+
+export default function BorrowCard({ borrow, book }) {
+  const [renewing, setRenewing] = useState(false)
+  const [toast,    setToast]    = useState(null)
+
+  const isApproved  = borrow.status === 'APPROVED'
+  const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
+  const isOverdue   = daysOverdue > 0
+
+  // Determine the displayed status — show OVERDUE when applicable
+  const displayStatus = isOverdue ? 'OVERDUE' : borrow.status
+
+  async function handleRenew() {
+    setRenewing(true)
+    try {
+      await api.post(`/borrows/${borrow.id}/renew`)
+      setToast({ message: 'Renewal request sent to library staff!', type: 'success' })
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
+    } finally {
+      setRenewing(false)
+    }
+  }
+
+  return (
+    <div className={`bg-white rounded-2xl border shadow-card p-4
+      ${isOverdue ? 'border-red-200' : 'border-green-100'}`}>
+
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+
+      <div className="flex gap-3 items-start">
+        {book?.coverImageUrl
+          ? <img src={book.coverImageUrl} alt={book.title} className="w-10 h-14 object-cover rounded-lg flex-shrink-0"/>
+          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📚</div>
+        }
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-gray-800 truncate">
+            {book?.title || `Assc. No. ${borrow.bookId}`}
+          </p>
+          <p className="text-xs text-gray-500 truncate">{book?.author}</p>
+          <p className="text-xs text-green-700 mt-1">{borrow.location?.replace('_', ' ')}</p>
+        </div>
+
+        <div className="flex flex-col items-end gap-1">
+          <StatusBadge status={displayStatus}/>
+          {isOverdue && (
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
+              ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
+              {daysOverdue}d overdue
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 pt-3 border-t border-green-50 grid grid-cols-2 gap-2">
+        <div>
+          <p className="text-[10px] text-gray-400 uppercase font-medium">Requested</p>
+          <p className="text-xs text-gray-700">{fmtDate(borrow.requestDate)}</p>
+        </div>
+        {borrow.dueDate && (
+          <div>
+            <p className="text-[10px] text-gray-400 uppercase font-medium">Due Date</p>
+            <p className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-700'}`}>
+              {fmtDate(borrow.dueDate)}
+            </p>
+          </div>
+        )}
+        {borrow.notes && (
+          <div className="col-span-2">
+            <p className="text-[10px] text-gray-400 uppercase font-medium">Note</p>
+            <p className="text-xs text-gray-600">{borrow.notes}</p>
+          </div>
+        )}
+      </div>
+
+      {/* Renew button — only for approved borrows (overdue or not) */}
+      {isApproved && (
+        <button
+          onClick={handleRenew}
+          disabled={renewing}
+          className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
+            ${isOverdue
+              ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
+              : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
+          {renewing ? 'Sending request…' : '🔄 Request Renewal'}
+        </button>
+      )}
+    </div>
+  )
+}
+</file>
+
+<file path="components/borrows/OverduePanel.jsx">
+import { useState }  from 'react'
+import Modal           from '../ui/Modal'
+import api             from '../../lib/api'
+
+function fmtDate(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
+}
+
+export default function OverduePanel({ borrows, users, books, onSendReminder, onExtend }) {
+  const [reminderTarget, setReminderTarget] = useState(null)
+  const [extendTarget,   setExtendTarget]   = useState(null)
+  const [newDueDate,     setNewDueDate]      = useState('')
+  const [sending,        setSending]         = useState(false)
+  const [extending,      setExtending]       = useState(false)
+
+  const overdueBorrows = borrows
+    .filter(b => b.status === 'APPROVED' && b.dueDate && getDaysOverdue(b.dueDate) > 0)
+    .sort((a, b) => getDaysOverdue(b.dueDate) - getDaysOverdue(a.dueDate))
+
+  const userMap = Object.fromEntries((users || []).map(u => [u.id, u]))
+  const bookMap = Object.fromEntries((books || []).map(b => [b.id, b]))
+
+  async function handleSendReminder() {
+    if (!reminderTarget) return
+    setSending(true)
+    try {
+      await onSendReminder(reminderTarget.id)
+      setReminderTarget(null)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  async function handleExtend() {
+    if (!extendTarget || !newDueDate) return
+    setExtending(true)
+    try {
+      await onExtend(extendTarget.id, newDueDate)
+      setExtendTarget(null)
+      setNewDueDate('')
+    } finally {
+      setExtending(false)
+    }
+  }
+
+  if (overdueBorrows.length === 0) {
+    return (
+      <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-8 text-center">
+        <span className="text-4xl mb-3 block">✅</span>
+        <p className="font-semibold text-green-800">No Overdue Books</p>
+        <p className="text-sm text-gray-400 mt-1">All borrowed books are within their due dates.</p>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="bg-white rounded-2xl border border-red-100 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 bg-red-50 border-b border-red-100">
+          <p className="text-sm font-bold text-red-700">
+            ⚠️ {overdueBorrows.length} Overdue Book{overdueBorrows.length > 1 ? 's' : ''}
+          </p>
+        </div>
+
+        <div className="divide-y divide-red-50">
+          {overdueBorrows.map(b => {
+            const u   = userMap[b.userId]
+            const bk  = bookMap[b.bookId]
+            const days = getDaysOverdue(b.dueDate)
+
+            return (
+              <div key={b.id} className="px-5 py-4 hover:bg-red-50/50 transition">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-bold
+                        ${days > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
+                        {days} day{days > 1 ? 's' : ''} overdue
+                      </span>
+                      <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
+                        {b.location === 'HIGH_SCHOOL' ? '🏫 HS' : '📚 Main'}
+                      </span>
+                    </div>
+
+                    <p className="font-semibold text-sm text-gray-800 truncate">
+                      {bk?.title || `Assc. No. ${b.bookId}`}
+                    </p>
+                    <p className="text-xs text-gray-500 truncate">{bk?.author}</p>
+
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <span className="text-gray-400">Borrower:</span>
+                        <p className="font-medium text-gray-700">{u?.name || '—'}</p>
+                        <p className="text-gray-400">{u?.email}</p>
+                      </div>
+                      <div>
+                        <span className="text-gray-400">Due Date:</span>
+                        <p className="font-medium text-red-600">{fmtDate(b.dueDate)}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-2 flex-shrink-0">
+                    <button
+                      onClick={() => setReminderTarget(b)}
+                      className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition">
+                      📩 Remind
+                    </button>
+                    <button
+                      onClick={() => {
+                        setExtendTarget(b)
+                        // Default to 7 days from today
+                        setNewDueDate(new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0])
+                      }}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition">
+                      📅 Extend
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Reminder confirmation modal */}
+      <Modal open={!!reminderTarget} onClose={() => setReminderTarget(null)}
+        title="📩 Send Overdue Reminder">
+        {reminderTarget && (
+          <div className="space-y-4">
+            <div className="bg-red-50 border border-red-100 rounded-xl p-4">
+              <p className="text-sm font-semibold text-red-800 mb-2">
+                Send reminder to: {userMap[reminderTarget.userId]?.name}
+              </p>
+              <p className="text-xs text-gray-600">Email: {userMap[reminderTarget.userId]?.email}</p>
+              <p className="text-xs text-gray-600 mt-1">
+                Book: {bookMap[reminderTarget.bookId]?.title || reminderTarget.bookId}
+              </p>
+              <p className="text-xs text-red-600 font-semibold mt-2">
+                {getDaysOverdue(reminderTarget.dueDate)} days overdue
+              </p>
+            </div>
+            <p className="text-sm text-gray-600">
+              This will send an in-app notification <strong>and</strong> post a message in the
+              borrower's chat thread so they can reply.
+            </p>
+            <div className="flex gap-3 pt-2">
+              <button onClick={() => setReminderTarget(null)} disabled={sending}
+                className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
+                  py-2.5 rounded-xl hover:bg-gray-50 transition disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={handleSendReminder} disabled={sending}
+                className="flex-1 bg-red-600 text-white font-semibold py-2.5 rounded-xl
+                  hover:bg-red-700 transition disabled:opacity-50">
+                {sending ? 'Sending…' : '✉️ Send Reminder'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Extend due date modal */}
+      <Modal open={!!extendTarget} onClose={() => { setExtendTarget(null); setNewDueDate('') }}
+        title="📅 Extend Due Date">
+        {extendTarget && (
+          <div className="space-y-4">
+            <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-sm">
+              <p className="font-semibold text-blue-800 mb-1">
+                {bookMap[extendTarget.bookId]?.title || `Assc. No. ${extendTarget.bookId}`}
+              </p>
+              <p className="text-gray-600">
+                Borrower: {userMap[extendTarget.userId]?.name}
+              </p>
+              <p className="text-red-600 text-xs font-semibold mt-1">
+                Currently {getDaysOverdue(extendTarget.dueDate)} days overdue
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                New Due Date <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="date"
+                value={newDueDate}
+                min={new Date().toISOString().split('T')[0]}
+                onChange={e => setNewDueDate(e.target.value)}
+                className="w-full border border-green-200 rounded-xl px-3 py-2.5 text-sm
+                  focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+            </div>
+
+            <div className="flex gap-3 pt-2">
+              <button onClick={() => { setExtendTarget(null); setNewDueDate('') }} disabled={extending}
+                className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
+                  py-2.5 rounded-xl hover:bg-gray-50 transition disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={handleExtend} disabled={extending || !newDueDate}
+                className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
+                  hover:bg-blue-700 transition disabled:opacity-50">
+                {extending ? 'Extending…' : '✅ Extend'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </>
+  )
+}
+</file>
+
+<file path="components/layout/BottomNav.jsx">
+import Link      from 'next/link'
+import { useRouter } from 'next/router'
+
+const NAV = [
+  { href: '/dashboard', label: 'Home',    icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
+  { href: '/borrow',    label: 'Borrow',  icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
+  { href: '/borrow/status', label: 'Status', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
+  { href: '/chat',      label: 'Chat',    icon: 'M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
+  { href: '/profile',   label: 'Profile', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' }
+]
+
+export default function BottomNav() {
+  const { pathname } = useRouter()
+  return (
+    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-green-200 shadow-nav z-30 safe-bottom">
+      <div className="flex max-w-lg mx-auto">
+        {NAV.map(({ href, label, icon }) => {
+
+          const active = pathname === href
+
+          return (
+            <Link key={href} href={href}
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors
+                ${active ? 'text-green-700' : 'text-gray-400 hover:text-green-600'}`}>
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d={icon}/>
+              </svg>
+              <span className={`text-[10px] font-medium ${active ? 'text-green-800' : ''}`}>{label}</span>
+              {active && <span className="w-1 h-1 rounded-full bg-green-600 mt-0.5"/>}
+            </Link>
+          )
+        })}
+      </div>
+    </nav>
+  )
+}
+</file>
+
+<file path="lib/constants.js">
+export const ROLES = { ADMIN: 'admin', CLERK: 'clerk', USER: 'user' }
+
+export const USER_STATUS = { ACTIVE: 'active', INACTIVE: 'inactive', SUSPENDED: 'suspended' }
+
+export const USER_TYPE = { STUDENT: 'student', EMPLOYEE: 'employee' }
+
+export const BORROW_STATUS = {
+  PENDING: 'PENDING', APPROVED: 'APPROVED',
+  REJECTED: 'REJECTED', RETURNED: 'RETURNED'
+}
+
+export const LIBRARY = { HIGH_SCHOOL: 'HIGH_SCHOOL', MAIN_LIBRARY: 'MAIN_LIBRARY' }
+
+export const THREAD_STATUS = { OPEN: 'OPEN', RESOLVED: 'RESOLVED' }
+
+export const MSG_TYPE = { INQUIRY: 'INQUIRY', FEEDBACK: 'FEEDBACK', COMPLAINT: 'COMPLAINT' }
+
+export const NOTIF_TYPE = {
+  BORROW_APPROVED:  'BORROW_APPROVED',
+  BORROW_REJECTED:  'BORROW_REJECTED',
+  BORROW_DUE:       'BORROW_DUE',
+  BORROW_RENEWED:   'BORROW_RENEWED',   // NEW — renewal request notification
+  CHAT_REPLY:       'CHAT_REPLY',
+  ACCOUNT_STATUS:   'ACCOUNT_STATUS'
+}
+
+// Exact Google Sheet tab names
+export const SHEETS = {
+  USERS:         'Users',
+  BOOKS_MAIN:    'Books_MainLibrary',
+  BOOKS_HS:      'Books_HighSchool',
+  BORROWS:       'BorrowRequests',
+  CHAT:          'ChatMessages',
+  NOTIFICATIONS: 'Notifications'
+}
+
+
+export const COL = {
+  USERS: {
+    ID:0, NAME:1, EMAIL:2, ROLE:3, DEPT:4,
+    STATUS:5, GOOGLE_ID:6, CREATED:7, LAST_LOGIN:8,
+    USER_TYPE:9, STUDENT_ID:10, YEAR:11, SECTION:12,
+    EMPLOYEE_NUM:13, POSITION:14, OFFICE:15, ASSIGNED_LIBRARY:16,
+    PASSWORD:17
+  },
+  BOOKS: {
+    // Col 0 label in Sheet: "Assc. No."  |  Col 3 label in Sheet: "Year"
+    ID:0, TITLE:1, AUTHOR:2, YEAR:3, CATEGORY:4, LOCATION:5,
+    TOTAL:6, AVAILABLE:7, DESC:8, COVER:9, ADDED_AT:10, ADDED_BY:11
+  },
+  BORROWS: {
+    ID:0, USER_ID:1, BOOK_ID:2, LOCATION:3, STATUS:4,
+    REQ_DATE:5, APPROVAL_DATE:6, DUE_DATE:7, RETURN_DATE:8,
+    PROCESSED_BY:9, NOTES:10
+  },
+  CHAT: {
+    ID:0, THREAD_ID:1, SENDER_ID:2, SENDER_ROLE:3, MSG_TYPE:4,
+    TEXT:5, TIMESTAMP:6, IS_READ:7, THREAD_STATUS:8, LIBRARY_LOCATION:9
+  },
+  NOTIFS: {
+    ID:0, RECIPIENT_ID:1, TYPE:2, TITLE:3, MESSAGE:4,
+    RELATED_ID:5, IS_READ:6, CREATED:7
+  }
+}
+
+export const LETTER = (n) => String.fromCharCode(65 + n)
+
+// Helper: Get correct books sheet name based on library location
+export function getBooksSheet(libraryLocation) {
+  return libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+}
+</file>
+
 <file path="package.json">
 {
   "name": "mvgfc-elibrary",
@@ -8086,6 +7285,889 @@ node_modules/
     "typescript": "^5"
   }
 }
+</file>
+
+<file path="pages/api/books/[id].js">
+import Joi from 'joi'
+import { compose }    from '../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
+import { withAuth }   from '../../../middleware/withAuth'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import * as cache     from '../../../lib/cache'
+import { readSheet, batchUpdate, rowNum, cellRange } from '../../../lib/sheets'
+import { SHEETS, COL, ROLES } from '../../../lib/constants'
+import { getBooks, toBook }   from './index'
+
+const updateSchema = Joi.object({
+  title:         Joi.string().max(255),
+  author:        Joi.string().max(255),
+  year:          Joi.string().max(10).allow(''),   
+  category:      Joi.string().max(100),
+  description:   Joi.string().max(1000).allow(''),
+  coverImageUrl: Joi.string().uri().allow(''),
+  totalCopies:   Joi.number().integer().min(1),
+  available:     Joi.number().integer().min(0)
+}).min(1)
+
+async function handlerBook(req, res) {
+  const { id } = req.query
+  const rows   = await getBooks()
+  const book   = rows.find(r => r[COL.BOOKS.ID] === id)
+  if (!book) httpError(404, 'Book not found')
+
+  if (req.method === 'GET')
+    return res.json({ success: true, data: toBook(book) })
+
+  if (req.method === 'PATCH') {
+    if (![ROLES.ADMIN, ROLES.CLERK].includes(req.user.role))
+      httpError(403, 'Forbidden')
+
+    const { error, value } = updateSchema.validate(req.body)
+    if (error) httpError(400, error.details[0].message)
+
+    const location  = book[COL.BOOKS.LOCATION]
+    const sheetName = location === 'HIGH_SCHOOL' ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+
+    const freshRows = await readSheet(sheetName)
+    const rn = rowNum(freshRows, COL.BOOKS.ID, id)
+    if (rn === -1) httpError(404, 'Book not found')
+
+    const updates = []
+    const map = {
+      title:         COL.BOOKS.TITLE,
+      author:        COL.BOOKS.AUTHOR,
+      year:          COL.BOOKS.YEAR,        
+      category:      COL.BOOKS.CATEGORY,
+      description:   COL.BOOKS.DESC,
+      coverImageUrl: COL.BOOKS.COVER,
+      totalCopies:   COL.BOOKS.TOTAL,
+      available:     COL.BOOKS.AVAILABLE
+    }
+    for (const [key, colIdx] of Object.entries(map)) {
+      if (value[key] !== undefined)
+        updates.push({ range: cellRange(sheetName, rn, colIdx), values: [value[key]] })
+    }
+
+    if (updates.length) await batchUpdate(updates)
+    cache.del('books')
+    cache.del(`books_${location}`)
+    return res.json({ success: true, message: 'Book updated' })
+  }
+
+  res.setHeader('Allow', ['GET', 'PATCH'])
+  res.status(405).json({ success: false, error: 'Method not allowed' })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerBook)
+</file>
+
+<file path="pages/api/books/index.js">
+import Joi from 'joi'
+import { v4 as uuid } from 'uuid'
+import { compose }    from '../../../lib/compose'
+import { withErrorHandler } from '../../../middleware/errorHandler'
+import { withAuth }   from '../../../middleware/withAuth'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import * as cache     from '../../../lib/cache'
+import { SHEETS, COL, ROLES, LIBRARY } from '../../../lib/constants'
+import { readSheet, appendRow, batchRead } from '../../../lib/sheets'
+
+const BOOKS_TTL = parseInt(process.env.CACHE_TTL_BOOKS_MS) || 10 * 60 * 1000
+
+export async function getBooks(libraryLocation = null) {
+  if (!libraryLocation) {
+    const [mainRows, hsRows] = await batchRead([SHEETS.BOOKS_MAIN, SHEETS.BOOKS_HS])
+    const combined = [...mainRows, ...hsRows]
+    cache.set('books', combined, BOOKS_TTL)
+    return combined
+  }
+  const sheetName = libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+  const cached = cache.get(`books_${libraryLocation}`)
+  if (cached) return cached
+  const rows = await readSheet(sheetName)
+  cache.set(`books_${libraryLocation}`, rows, BOOKS_TTL)
+  return rows
+}
+
+export function toBook(r) {
+  return {
+    id:            r[COL.BOOKS.ID],
+    title:         r[COL.BOOKS.TITLE],
+    author:        r[COL.BOOKS.AUTHOR],
+    year:          r[COL.BOOKS.YEAR],       // renamed from isbn
+    category:      r[COL.BOOKS.CATEGORY],
+    location:      r[COL.BOOKS.LOCATION],
+    totalCopies:   parseInt(r[COL.BOOKS.TOTAL])     || 0,
+    available:     parseInt(r[COL.BOOKS.AVAILABLE]) || 0,
+    description:   r[COL.BOOKS.DESC],
+    coverImageUrl: r[COL.BOOKS.COVER],
+    addedAt:       r[COL.BOOKS.ADDED_AT],
+    addedBy:       r[COL.BOOKS.ADDED_BY]
+  }
+}
+
+const createSchema = Joi.object({
+  title:         Joi.string().max(255).required(),
+  author:        Joi.string().max(255).required(),
+  year:          Joi.string().max(10).optional().allow(''),  // renamed from isbn
+  category:      Joi.string().max(100).required(),
+  location:      Joi.string().valid(...Object.values(LIBRARY)).required(),
+  totalCopies:   Joi.number().integer().min(1).required(),
+  description:   Joi.string().max(1000).optional().allow(''),
+  coverImageUrl: Joi.string().uri().optional().allow('')
+})
+
+async function handler(req, res) {
+  if (req.method === 'GET') {
+    let rows = await getBooks()
+
+    if (req.user.role === ROLES.CLERK) {
+      const assignedLibrary = req.user.assignedLibrary
+      if (!assignedLibrary)
+        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
+      rows = rows.filter(r => r[COL.BOOKS.LOCATION] === assignedLibrary)
+    }
+
+    const { location, category, search } = req.query
+    if (location) rows = rows.filter(r => r[COL.BOOKS.LOCATION] === location.toUpperCase())
+    if (category) rows = rows.filter(r => r[COL.BOOKS.CATEGORY]?.toLowerCase() === category.toLowerCase())
+    if (search) {
+      const q = search.toLowerCase()
+      rows = rows.filter(r =>
+        r[COL.BOOKS.TITLE]?.toLowerCase().includes(q)  ||
+        r[COL.BOOKS.AUTHOR]?.toLowerCase().includes(q) ||
+        r[COL.BOOKS.YEAR]?.includes(q)                 // search by year too
+      )
+    }
+    return res.json({ success: true, data: rows.map(toBook), total: rows.length })
+  }
+
+  if (req.method === 'POST') {
+    if (![ROLES.ADMIN, ROLES.CLERK].includes(req.user.role))
+      return res.status(403).json({ success: false, error: 'Forbidden' })
+
+    const { error, value } = createSchema.validate(req.body)
+    if (error) return res.status(400).json({ success: false, error: error.details[0].message })
+
+    if (req.user.role === ROLES.CLERK) {
+      const assignedLibrary = req.user.assignedLibrary
+      if (!assignedLibrary)
+        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
+      if (value.location !== assignedLibrary)
+        return res.status(403).json({ success: false,
+          error: `You can only add books to ${assignedLibrary === 'HIGH_SCHOOL' ? 'High School Library' : 'Main Library'}` })
+    }
+
+    const sheetName = value.location === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+    const id  = uuid()
+    const now = new Date().toISOString()
+
+    await appendRow(sheetName, [
+      id, value.title, value.author,
+      value.year || '',          // col 3 — was isbn, now year
+      value.category, value.location,
+      value.totalCopies, value.totalCopies,
+      value.description || '', value.coverImageUrl || '',
+      now, req.user.id
+    ])
+
+    cache.del('books')
+    cache.del(`books_${value.location}`)
+    return res.status(201).json({ success: true, data: { id } })
+  }
+
+  res.setHeader('Allow', ['GET', 'POST'])
+  res.status(405).json({ success: false, error: 'Method not allowed' })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
+</file>
+
+<file path="pages/api/borrows/[id]/remind.js">
+import { v4 as uuid } from 'uuid'
+import { compose }     from '../../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { withRole }    from '../../../../middleware/withRole'
+import { rateLimiter } from '../../../../middleware/rateLimiter'
+import { trigger, ch } from '../../../../lib/pusher'
+import { readSheet, appendRow, batchRead } from '../../../../lib/sheets'
+import {
+  SHEETS, COL, ROLES, NOTIF_TYPE, THREAD_STATUS, getBooksSheet
+} from '../../../../lib/constants'
+
+async function handlerRemind(req, res) {
+  if (req.method !== 'POST')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { id } = req.query
+
+  // Read borrows first to determine which books sheet to use
+  const borrowsRows = await readSheet(SHEETS.BORROWS)
+  const borrow = borrowsRows.find(r => r[COL.BORROWS.ID] === id)
+  if (!borrow) httpError(404, 'Borrow request not found')
+  if (borrow[COL.BORROWS.STATUS] !== 'APPROVED')
+    httpError(400, 'Can only send reminders for approved borrows')
+
+  const borrowLocation = borrow[COL.BORROWS.LOCATION]
+  const booksSheetName = getBooksSheet(borrowLocation)   // FIX: use correct sheet
+
+  const [users, books] = await batchRead([SHEETS.USERS, booksSheetName])
+
+  const user = users.find(u => u[COL.USERS.ID] === borrow[COL.BORROWS.USER_ID])
+  const book = books.find(b => b[COL.BOOKS.ID] === borrow[COL.BORROWS.BOOK_ID])
+  if (!user) httpError(404, 'User not found')
+
+  const dueDate  = borrow[COL.BORROWS.DUE_DATE]
+  const now      = new Date()
+  const due      = new Date(dueDate)
+  const daysOverdue = Math.floor((now - due) / (1000 * 60 * 60 * 24))
+  const timestamp   = new Date().toISOString()
+
+  const bookTitle   = book?.[COL.BOOKS.TITLE] || `Assc. No. ${borrow[COL.BORROWS.BOOK_ID]}`
+  const formattedDue = new Date(dueDate).toLocaleDateString('en-PH', {
+    year: 'numeric', month: 'long', day: 'numeric'
+  })
+
+  // 1. In-app notification
+  await appendRow(SHEETS.NOTIFICATIONS, [
+    uuid(), user[COL.USERS.ID],
+    NOTIF_TYPE.BORROW_DUE,
+    '⚠️ Book Return Reminder',
+    `Your borrowed book "${bookTitle}" is ${daysOverdue} day(s) overdue (due: ${formattedDue}). Please return it as soon as possible.`,
+    id, 'FALSE', timestamp
+  ])
+
+  // 2. Chat message from staff into the user's thread — allows the user to reply
+  const chatText = `📚 *Overdue Notice* — Hello! This is a reminder from ${req.user.name} that the book "${bookTitle}" was due on ${formattedDue} and is now ${daysOverdue} day(s) overdue. Please return it to the library at your earliest convenience. If you need an extension, you can reply here. Thank you!`
+  const chatId   = uuid()
+
+  await appendRow(SHEETS.CHAT, [
+    chatId,
+    user[COL.USERS.ID],   
+    req.user.id,           
+    req.user.role,         
+    'INQUIRY',
+    chatText,
+    timestamp,
+    'FALSE',
+    THREAD_STATUS.OPEN,
+    borrowLocation
+  ])
+
+  // 3. Pusher: update borrower's notification badge
+  await trigger(ch.userNotif(user[COL.USERS.ID]), 'overdue-reminder', {
+    title:    '⚠️ Book Return Reminder',
+    message:  `Your book is ${daysOverdue} day(s) overdue`,
+    borrowId: id
+  })
+
+  // 4. Pusher: push chat message to borrower's chat channel (live update)
+  await trigger(ch.chat(user[COL.USERS.ID]), 'new-message', {
+    id:          chatId,
+    threadId:    user[COL.USERS.ID],
+    senderId:    req.user.id,
+    senderName:  req.user.name,
+    senderRole:  req.user.role,
+    messageText: chatText,
+    timestamp,
+    libraryLocation: borrowLocation
+  })
+
+  // 5. Pusher: refresh thread list in admin chat console
+  await trigger(ch.adminInbox(borrowLocation), 'new-chat-message', {
+    threadId: user[COL.USERS.ID],
+    userName: user[COL.USERS.NAME],
+    preview:  chatText.substring(0, 80),
+    library:  borrowLocation
+  })
+
+  res.json({
+    success: true,
+    message: 'Reminder sent successfully',
+    data:    { sentTo: user[COL.USERS.EMAIL], daysOverdue, chatSent: true }
+  })
+}
+
+export default compose(
+  withErrorHandler,
+  rateLimiter(),
+  withAuth,
+  withRole(ROLES.ADMIN, ROLES.CLERK)
+)(handlerRemind)
+</file>
+
+<file path="pages/chat.jsx">
+import { useRef, useEffect, useState } from 'react'
+import { useSession }      from 'next-auth/react'
+import { useRouter }       from 'next/router'
+import { v4 as uuid }      from 'uuid'
+import MessageBubble       from '../components/chat/MessageBubble'
+import ComplaintTag        from '../components/chat/ComplaintTag'
+import Spinner             from '../components/ui/Spinner'
+import Toast               from '../components/ui/Toast'
+import { useChat }         from '../hooks/useChat'
+import { useNotifications } from '../hooks/useNotifications'
+
+const MSG_TYPES = [
+  { id: 'INQUIRY',   label: '🔍 Inquiry',   desc: 'Ask about books or services' },
+  { id: 'FEEDBACK',  label: '💬 Feedback',  desc: 'Share your experience' },
+  { id: 'COMPLAINT', label: '⚠️ Complaint', desc: 'Report an issue' }
+]
+const LIBRARIES = [
+  { id: 'HIGH_SCHOOL',  label: '🏫 High School Library', desc: 'For HS students and faculty' },
+  { id: 'MAIN_LIBRARY', label: '📚 Main Library',        desc: 'For college departments' }
+]
+
+function fmtTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const now = new Date()
+  if (d.toDateString() === now.toDateString())
+    return d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })
+}
+
+export default function ChatPage() {
+  const router  = useRouter()
+  const { data: session }  = useSession()
+  const { notifications, markRead } = useNotifications()
+  const {
+    threads, threadsLoading,
+    messages, messagesLoading,
+    activeThreadId, setActiveThreadId,
+    sendMessage
+  } = useChat()
+
+  const userId = session?.user?.id
+
+  // New ticket form state
+  const [showNewForm, setShowNewForm] = useState(false)
+  const [newMsgType,  setNewMsgType]  = useState(null)
+  const [newLibrary,  setNewLibrary]  = useState(null)
+  const [newText,     setNewText]     = useState('')
+  const [startingNew, setStartingNew] = useState(false)
+
+  // Active thread reply state
+  const [replyText,  setReplyText]  = useState('')
+  const [isSending,  setIsSending]  = useState(false)
+  const submitLockRef = useRef(false)
+  const lastSubmitRef = useRef(0)
+
+  const [toast, setToast] = useState(null)
+  const bottomRef    = useRef(null)
+  const textareaRef  = useRef(null)
+
+  // Auto-scroll
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  // Auto-clear chat-reply notifications on open
+  useEffect(() => {
+    if (!notifications.length) return
+    notifications
+      .filter(n => !n.isRead && n.type === 'CHAT_REPLY')
+      .forEach(n => markRead(n.id))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifications.length])
+
+  const activeThread = threads.find(t => t.threadId === activeThreadId) || null
+  const isResolved   = activeThread?.threadStatus === 'RESOLVED'
+
+  // ── Create new ticket ────────────────────────────────────────────────────
+  async function handleCreateTicket() {
+    if (!newText.trim() || !newMsgType || !newLibrary) {
+      setToast({ message: 'Please fill in all fields', type: 'error' })
+      return
+    }
+    setStartingNew(true)
+    const newThreadId = uuid()  // client-generated UUID = new ticket
+    try {
+      await sendMessage(newText.trim(), newMsgType, newLibrary, newThreadId)
+      setShowNewForm(false)
+      setNewText('')
+      setNewMsgType(null)
+      setNewLibrary(null)
+      setActiveThreadId(newThreadId)
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to create ticket.', type: 'error' })
+    } finally {
+      setStartingNew(false)
+    }
+  }
+
+  // ── Reply to active thread ───────────────────────────────────────────────
+  async function handleReply() {
+    const trimmed = replyText.trim()
+    if (!trimmed || submitLockRef.current || isSending || isResolved) return
+    const now = Date.now()
+    if (now - lastSubmitRef.current < 1000) return
+
+    submitLockRef.current   = true
+    setIsSending(true)
+    lastSubmitRef.current   = now
+    setReplyText('')
+
+    try {
+      await sendMessage(trimmed)
+    } catch (err) {
+      if (!err.message?.includes('progress')) {
+        setReplyText(trimmed)
+        setToast({ message: err.message || 'Failed to send.', type: 'error' })
+      }
+    } finally {
+      setTimeout(() => { submitLockRef.current = false; setIsSending(false) }, 1500)
+      textareaRef.current?.focus()
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      e.stopPropagation()
+      if (!submitLockRef.current && !isSending) handleReply()
+    }
+  }
+
+  const canSend = replyText.trim() && !submitLockRef.current && !isSending && !isResolved
+
+  return (
+    <div className="min-h-screen bg-green-50 flex flex-col safe-top">
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+
+      {/* Top bar */}
+      <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30">
+        {activeThreadId
+          ? (
+            <button onClick={() => setActiveThreadId(null)}
+              className="p-1 rounded-full hover:bg-green-700 transition">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
+              </svg>
+            </button>
+          )
+          : (
+            <button onClick={() => router.back()}
+              className="p-1 rounded-full hover:bg-green-700 transition">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
+              </svg>
+            </button>
+          )
+        }
+        <div className="w-9 h-9 rounded-full bg-green-600 flex items-center justify-center flex-shrink-0">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round"
+              d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-sm">
+            {activeThreadId
+              ? `${LIBRARIES.find(l => l.id === activeThread?.library)?.label.split(' ').slice(1).join(' ') || 'Library'} Support`
+              : 'My Tickets'}
+          </p>
+          <p className="text-green-300 text-xs">
+            {activeThreadId
+              ? isResolved ? '✔ Resolved' : '🟢 Active'
+              : `${threads.length} ticket${threads.length !== 1 ? 's' : ''}`}
+          </p>
+        </div>
+        {!activeThreadId && (
+          <button
+            onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
+            className="bg-white text-green-800 text-xs font-bold px-3 py-1.5 rounded-xl hover:bg-green-100 transition flex-shrink-0">
+            + New Ticket
+          </button>
+        )}
+      </header>
+
+      {/* ── THREAD LIST VIEW ─────────────────────────────────────────────── */}
+      {!activeThreadId && (
+        <div className="flex-1 overflow-y-auto max-w-lg mx-auto w-full">
+
+          {/* New ticket form */}
+          {showNewForm && (
+            <div className="m-4 bg-white rounded-2xl border border-green-200 p-4 shadow-sm space-y-3">
+              <p className="text-sm font-bold text-green-800">New Support Ticket</p>
+
+              <div>
+                <p className="text-xs font-semibold text-green-700 mb-1.5 uppercase tracking-wide">Library</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {LIBRARIES.map(lib => (
+                    <button key={lib.id} onClick={() => setNewLibrary(lib.id)}
+                      className={`p-2.5 rounded-xl border-2 text-xs font-semibold text-left transition
+                        ${newLibrary === lib.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                      {lib.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-semibold text-green-700 mb-1.5 uppercase tracking-wide">Type</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {MSG_TYPES.map(t => (
+                    <button key={t.id} onClick={() => setNewMsgType(t.id)}
+                      className={`p-2 rounded-xl border-2 text-center text-xs font-semibold transition
+                        ${newMsgType === t.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                      <span className="block text-base">{t.label.split(' ')[0]}</span>
+                      {t.label.split(' ')[1]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <textarea
+                value={newText}
+                onChange={e => setNewText(e.target.value)}
+                rows={3}
+                placeholder="Describe your inquiry, feedback, or complaint…"
+                className="w-full border border-green-200 rounded-xl px-3 py-2 text-sm
+                  focus:outline-none focus:ring-2 focus:ring-green-500 resize-none bg-green-50"
+              />
+
+              <div className="flex gap-2">
+                <button onClick={() => { setShowNewForm(false); setNewText(''); setNewMsgType(null); setNewLibrary(null) }}
+                  className="flex-1 border-2 border-gray-200 text-gray-600 text-xs font-semibold py-2 rounded-xl hover:bg-gray-50 transition">
+                  Cancel
+                </button>
+                <button onClick={handleCreateTicket}
+                  disabled={startingNew || !newText.trim() || !newMsgType || !newLibrary}
+                  className="flex-1 bg-green-700 text-white text-xs font-semibold py-2 rounded-xl hover:bg-green-800 transition disabled:opacity-50">
+                  {startingNew ? 'Sending…' : '✔ Submit Ticket'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Ticket list */}
+          {threadsLoading ? (
+            <Spinner/>
+          ) : threads.length === 0 && !showNewForm ? (
+            <div className="flex flex-col items-center justify-center h-64 text-center px-6">
+              <span className="text-5xl mb-4">💬</span>
+              <p className="font-semibold text-green-800">No tickets yet</p>
+              <p className="text-gray-400 text-sm mt-1">Tap <strong>+ New Ticket</strong> to contact library staff.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-green-50">
+              {threads.map(t => {
+                const lib     = LIBRARIES.find(l => l.id === t.library)
+                const resolved = t.threadStatus === 'RESOLVED'
+                return (
+                  <button key={t.threadId}
+                    onClick={() => { setActiveThreadId(t.threadId); setShowNewForm(false) }}
+                    className="w-full text-left px-4 py-4 hover:bg-green-50 transition flex gap-3 items-start">
+                    {/* Icon */}
+                    <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center text-white text-sm font-bold
+                      ${resolved ? 'bg-gray-400' : 'bg-green-600'}`}>
+                      {t.messageType === 'COMPLAINT' ? '⚠' : t.messageType === 'FEEDBACK' ? '💬' : '🔍'}
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <ComplaintTag type={t.messageType}/>
+                          {resolved && (
+                            <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">
+                              ✔ Resolved
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtTime(t.lastTimestamp)}</span>
+                      </div>
+                      <p className="text-xs text-green-700 mt-0.5 font-medium">{lib?.label || t.library}</p>
+                      <p className="text-xs text-gray-500 mt-0.5 truncate">{t.lastMessage}</p>
+                    </div>
+
+                    {t.unreadCount > 0 && (
+                      <span className="flex-shrink-0 w-5 h-5 bg-red-500 text-white text-[10px]
+                        font-bold rounded-full flex items-center justify-center">
+                        {t.unreadCount > 9 ? '9+' : t.unreadCount}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── THREAD DETAIL VIEW ───────────────────────────────────────────── */}
+      {activeThreadId && (
+        <>
+          <div className="flex-1 overflow-y-auto px-4 pt-4 pb-4 max-w-lg mx-auto w-full chat-scroll">
+            {messagesLoading ? <Spinner/> : (
+              <>
+                <div className="bg-green-100 rounded-xl px-3 py-2 mb-4 text-center">
+                  <p className="text-xs text-green-700">
+                    💡 Library staff will reply as soon as possible. Please be patient.
+                  </p>
+                </div>
+
+                {messages.map(msg => (
+                  <MessageBubble key={msg.id} msg={msg} isOwn={msg.senderId === userId}/>
+                ))}
+
+                {isResolved && (
+                  <div className="text-center my-4 space-y-3">
+                    <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full inline-block">
+                      ✔ This conversation has been resolved
+                    </span>
+                    <div>
+                      <button
+                        onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
+                        className="bg-green-700 hover:bg-green-800 text-white text-xs
+                          font-semibold px-4 py-2 rounded-xl transition">
+                        + Open New Ticket
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div ref={bottomRef}/>
+              </>
+            )}
+          </div>
+
+          {/* Reply input — hidden when resolved */}
+          {!isResolved && (
+            <form onSubmit={e => { e.preventDefault(); e.stopPropagation() }}
+              className="sticky bottom-0 w-full max-w-lg mx-auto bg-white border-t border-green-100 px-4 py-3">
+              <div className="flex gap-2 items-end">
+                <textarea
+                  ref={textareaRef}
+                  value={replyText}
+                  onChange={e => setReplyText(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  rows={1}
+                  disabled={isSending}
+                  placeholder="Type a reply…"
+                  className="flex-1 resize-none border border-green-200 rounded-xl px-3 py-2 text-sm
+                    focus:outline-none focus:ring-2 focus:ring-green-500 max-h-28 bg-green-50
+                    placeholder-gray-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ overflowY: replyText.split('\n').length > 3 ? 'auto' : 'hidden' }}
+                />
+                <button onClick={handleReply} disabled={!canSend} type="button"
+                  className="w-10 h-10 rounded-xl bg-green-700 text-white flex items-center
+                    justify-center disabled:opacity-40 hover:bg-green-800 transition flex-shrink-0">
+                  {isSending
+                    ? <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
+                        <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
+                      </svg>
+                    : <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                      </svg>
+                  }
+                </button>
+              </div>
+            </form>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+export async function getServerSideProps(ctx) {
+  const { getServerSession } = await import('next-auth/next')
+  const { authOptions }      = await import('./api/auth/[...nextauth]')
+  const session = await getServerSession(ctx.req, ctx.res, authOptions)
+  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
+  return { props: {} }
+}
+</file>
+
+<file path="pages/dashboard/borrows.jsx">
+import { useState } from 'react'
+import DashboardLayout from '../../components/layout/DashboardLayout'
+import BorrowFilters   from '../../components/borrows/BorrowFilters'
+import BorrowsTable    from '../../components/borrows/BorrowsTable'
+import OverduePanel    from '../../components/borrows/OverduePanel'
+import ApproveModal    from '../../components/borrows/ApproveModal'
+import RejectModal     from '../../components/borrows/RejectModal'
+import Modal           from '../../components/ui/Modal'
+import Spinner         from '../../components/ui/Spinner'
+import EmptyState      from '../../components/ui/EmptyState'
+import Toast           from '../../components/ui/Toast'
+import { useDashboardBorrows } from '../../hooks/useDashboardBorrows'
+import { useDashboardUsers }   from '../../hooks/useDashboardUsers'
+import { withDashboardAuth }   from '../../components/guards/withDashboardAuth'
+import useSWR from 'swr'
+import api    from '../../lib/api'
+
+export default function BorrowsPage() {
+  const { borrows, loading, approveBorrow, rejectBorrow, returnBorrow } = useDashboardBorrows()
+  const { users }  = useDashboardUsers()
+  const { data: books = [] } = useSWR('/books', url => api.get(url).then(d => d.data))
+
+  const [filters,       setFilters]  = useState({ status: 'ALL', library: 'ALL', search: '' })
+  const [approveTarget, setApprove]  = useState(null)
+  const [rejectTarget,  setReject]   = useState(null)
+  const [returnTarget,  setReturn]   = useState(null)
+  const [actionLoading, setActLoad]  = useState(false)
+  const [toast,         setToast]    = useState(null)
+  const [showOverdue,   setOverdue]  = useState(false)
+
+  function showToast(msg, type = 'success') { setToast({ message: msg, type }) }
+  function patchFilter(patch) { setFilters(prev => ({ ...prev, ...patch })) }
+
+  // Client-side filter
+  let filtered = [...borrows]
+  if (filters.status  !== 'ALL') filtered = filtered.filter(b => b.status   === filters.status)
+  if (filters.library !== 'ALL') filtered = filtered.filter(b => b.location === filters.library)
+  if (filters.search) {
+    const q = filters.search.toLowerCase()
+    filtered = filtered.filter(b =>
+      b.userId?.toLowerCase().includes(q) || b.bookId?.toLowerCase().includes(q)
+    )
+  }
+  filtered.sort((a, b) => new Date(b.requestDate) - new Date(a.requestDate))
+
+  // Count overdue for badge
+  const overdueCount = borrows.filter(b => {
+    if (b.status !== 'APPROVED' || !b.dueDate) return false
+    return Date.now() > new Date(b.dueDate).getTime()
+  }).length
+
+  async function handleSendReminder(borrowId) {
+    setActLoad(true)
+    try {
+      await api.post(`/borrows/${borrowId}/remind`)
+      showToast('Reminder sent and posted to borrower chat!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleExtend(borrowId, dueDate) {
+    setActLoad(true)
+    try {
+      await api.patch(`/borrows/${borrowId}/extend`, { dueDate })
+      showToast('Due date extended successfully!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleApprove(id, dueDate) {
+    setActLoad(true)
+    try {
+      await approveBorrow(id, dueDate)
+      setApprove(null)
+      showToast('Request approved successfully!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleReject(id, notes) {
+    setActLoad(true)
+    try {
+      await rejectBorrow(id, notes)
+      setReject(null)
+      showToast('Request rejected.')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleReturn(id) {
+    setActLoad(true)
+    try {
+      await returnBorrow(id)
+      setReturn(null)
+      showToast('Book marked as returned!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  return (
+    <DashboardLayout title="Borrow Management">
+      {toast && <Toast {...toast} onClose={() => setToast(null)}/>}
+
+      {/* View toggle */}
+      <div className="flex gap-3 mb-5">
+        <button onClick={() => setOverdue(false)}
+          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${!showOverdue
+              ? 'bg-green-700 text-white'
+              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'}`}>
+          📋 All Requests
+        </button>
+        <button onClick={() => setOverdue(true)}
+          className={`relative flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${showOverdue
+              ? 'bg-red-600 text-white'
+              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'}`}>
+          ⚠️ Overdue Books
+          {overdueCount > 0 && (
+            <span className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-[10px] font-bold
+              flex items-center justify-center
+              ${showOverdue ? 'bg-white text-red-600' : 'bg-red-500 text-white'}`}>
+              {overdueCount > 9 ? '9+' : overdueCount}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {showOverdue ? (
+        loading ? <Spinner/> : (
+          <OverduePanel
+            borrows={borrows}
+            users={users}
+            books={books}
+            onSendReminder={handleSendReminder}
+            onExtend={handleExtend}
+          />
+        )
+      ) : (
+        <>
+          <BorrowFilters {...filters} onChange={patchFilter}/>
+          {loading ? <Spinner/> : filtered.length === 0
+            ? <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters."/>
+            : <BorrowsTable
+                borrows={filtered} users={users} books={books}
+                onApprove={b => setApprove(b)}
+                onReject={b  => setReject(b)}
+                onReturn={b  => setReturn(b)}
+              />
+          }
+        </>
+      )}
+
+      <ApproveModal open={!!approveTarget} borrow={approveTarget}
+        loading={actionLoading} onConfirm={handleApprove} onClose={() => setApprove(null)}/>
+
+      <RejectModal open={!!rejectTarget} borrow={rejectTarget}
+        loading={actionLoading} onConfirm={handleReject} onClose={() => setReject(null)}/>
+
+      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✔ Confirm Return">
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            Mark borrow request{' '}
+            <span className="font-mono font-semibold">{returnTarget?.id?.slice(0, 8)}…</span> as
+            returned? This will restore the book's available copy count.
+          </p>
+          <div className="flex gap-3 pt-2">
+            <button onClick={() => setReturn(null)} disabled={actionLoading}
+              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
+                py-2.5 rounded-xl hover:bg-gray-50 transition">
+              Cancel
+            </button>
+            <button onClick={() => handleReturn(returnTarget.id)} disabled={actionLoading}
+              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
+                hover:bg-blue-700 transition disabled:opacity-50">
+              {actionLoading ? 'Confirming…' : '✔ Confirm Return'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+    </DashboardLayout>
+  )
+}
+
+export const getServerSideProps = withDashboardAuth()
 </file>
 
 <file path="pages/profile.jsx">

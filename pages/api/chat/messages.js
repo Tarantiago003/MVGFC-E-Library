@@ -15,17 +15,14 @@ const schema = Joi.object({
   library:     Joi.string().valid(...Object.values(LIBRARY)).optional()
 })
 
-// 🔥 IN-MEMORY DUPLICATE DETECTION CACHE
-const recentMessages = new Map() // Key: `${threadId}:${userId}:${messageText}`, Value: timestamp
-const DUPLICATE_WINDOW = 5000 // 5 seconds
+// In-memory duplicate detection
+const recentMessages = new Map()
+const DUPLICATE_WINDOW = 5000
 
-// 🔥 CLEANUP OLD ENTRIES EVERY 10 SECONDS
 setInterval(() => {
   const now = Date.now()
-  for (const [key, timestamp] of recentMessages.entries()) {
-    if (now - timestamp > DUPLICATE_WINDOW) {
-      recentMessages.delete(key)
-    }
+  for (const [key, ts] of recentMessages.entries()) {
+    if (now - ts > DUPLICATE_WINDOW) recentMessages.delete(key)
   }
 }, 10000)
 
@@ -39,52 +36,46 @@ async function handler(req, res) {
   const { threadId, messageText, messageType, library } = value
   const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
 
-  if (!isStaff && threadId !== req.user.id)
-    httpError(403, 'You can only send messages in your own thread')
+  // For users: verify they own the thread (have previously sent to it)
+  // For staff: no restriction — they can reply to any thread
+  if (!isStaff) {
+    const rows = await readSheet(SHEETS.CHAT)
+    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
+    if (threadRows.length > 0) {
+      // Existing thread — must be the owner
+      const isOwner = threadRows.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+      if (!isOwner) httpError(403, 'You can only send messages in your own threads')
+    }
+    // threadRows.length === 0 means this is a brand new thread — allow it
+  }
 
-  // 🔥 DUPLICATE DETECTION - Check if same message was sent recently
-  const duplicateKey = `${threadId}:${req.user.id}:${messageText.trim()}`
-  const lastSent = recentMessages.get(duplicateKey)
-  const now = Date.now()
-  
+  // Duplicate detection
+  const dupKey  = `${threadId}:${req.user.id}:${messageText.trim()}`
+  const lastSent = recentMessages.get(dupKey)
+  const now      = Date.now()
+
   if (lastSent && (now - lastSent) < DUPLICATE_WINDOW) {
-    console.log('🔒 SERVER BLOCKED DUPLICATE:', duplicateKey)
-    // Return success to prevent client retries, but don't actually save
-    return res.status(200).json({ 
-      success: true, 
+    console.log('Server blocked duplicate:', dupKey)
+    return res.status(200).json({
+      success: true,
       message: 'Duplicate message blocked',
       data: { id: 'DUPLICATE_BLOCKED' }
     })
   }
-
-  // 🔥 RECORD THIS MESSAGE
-  recentMessages.set(duplicateKey, now)
+  recentMessages.set(dupKey, now)
 
   // Determine library location
   let libraryLocation = library || LIBRARY.MAIN_LIBRARY
-  
-  if (isStaff) {
-    libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
-  } else {
-    // Staff replying - use their assigned library
-    libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
-  }
+  if (isStaff) libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
 
-  const msgId = uuid()
-  const timestamp = new Date().toISOString()
+  const msgId       = uuid()
+  const timestamp   = new Date().toISOString()
   const threadStatus = THREAD_STATUS.OPEN
 
   await appendRow(SHEETS.CHAT, [
-    msgId,
-    threadId,
-    req.user.id,
-    req.user.role,
-    messageType || '',
-    messageText,
-    timestamp,
-    'FALSE',
-    threadStatus,
-    libraryLocation
+    msgId, threadId, req.user.id, req.user.role,
+    messageType || '', messageText,
+    timestamp, 'FALSE', threadStatus, libraryLocation
   ])
 
   const payload = {
@@ -98,24 +89,38 @@ async function handler(req, res) {
     libraryLocation
   }
 
-  // Broadcast to thread channel
+  // Broadcast to thread channel (both user + staff subscribe to this)
   await trigger(ch.chat(threadId), 'new-message', payload)
 
   if (isStaff) {
-    await trigger(ch.userNotif(threadId), 'chat-reply', {
-      title:   'New reply from library staff',
-      message: messageText.substring(0, 80)
-    })
-    await appendRow(SHEETS.NOTIFICATIONS, [
-      uuid(), threadId, NOTIF_TYPE.CHAT_REPLY,
-      'Library Staff Replied',
-      `Staff replied: "${messageText.substring(0, 60)}${messageText.length > 60 ? '…' : ''}"`,
-      msgId, 'FALSE', timestamp
-    ])
+    // Find the thread owner (first user-role sender)
+    const rows = await readSheet(SHEETS.CHAT)
+    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
+    const ownerRow   = threadRows.find(r => r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+    const ownerId    = ownerRow?.[COL.CHAT.SENDER_ID]
+
+    if (ownerId) {
+      // Notify the user
+      await trigger(ch.userNotif(ownerId), 'chat-reply', {
+        threadId,
+        title:   'New reply from library staff',
+        message: messageText.substring(0, 80)
+      })
+      await appendRow(SHEETS.NOTIFICATIONS, [
+        uuid(), ownerId, NOTIF_TYPE.CHAT_REPLY,
+        'Library Staff Replied',
+        `Staff replied: "${messageText.substring(0, 60)}${messageText.length > 60 ? '…' : ''}"`,
+        msgId, 'FALSE', timestamp
+      ])
+    }
   } else {
+    // User sent — notify admin/clerk inbox
     await trigger(ch.adminInbox(libraryLocation), 'new-chat-message', {
-      threadId, userName: req.user.name, preview: messageText.substring(0, 80),
-      library: libraryLocation
+      threadId,
+      userId:   req.user.id,
+      userName: req.user.name,
+      preview:  messageText.substring(0, 80),
+      library:  libraryLocation
     })
   }
 

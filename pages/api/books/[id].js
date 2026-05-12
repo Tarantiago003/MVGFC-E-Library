@@ -11,7 +11,7 @@ import { getBooks, toBook }   from './index'
 const updateSchema = Joi.object({
   title:         Joi.string().max(255),
   author:        Joi.string().max(255),
-  year:          Joi.string().max(10).allow(''),   // renamed from isbn
+  year:          Joi.string().max(10).allow(''),   
   category:      Joi.string().max(100),
   description:   Joi.string().max(1000).allow(''),
   coverImageUrl: Joi.string().uri().allow(''),
@@ -46,7 +46,7 @@ async function handlerBook(req, res) {
     const map = {
       title:         COL.BOOKS.TITLE,
       author:        COL.BOOKS.AUTHOR,
-      year:          COL.BOOKS.YEAR,        // renamed from isbn
+      year:          COL.BOOKS.YEAR,        
       category:      COL.BOOKS.CATEGORY,
       description:   COL.BOOKS.DESC,
       coverImageUrl: COL.BOOKS.COVER,
