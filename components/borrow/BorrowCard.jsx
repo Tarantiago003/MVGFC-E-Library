@@ -1,8 +1,9 @@
-import { useState }  from 'react'
-import StatusBadge    from '../ui/StatusBadge'
-import Toast          from '../ui/Toast'
-import { fmtDate }    from '../../lib/utils'
-import api            from '../../lib/api'
+import { useState }     from 'react'
+import StatusBadge       from '../ui/StatusBadge'
+import Toast             from '../ui/Toast'
+import { fmtDate }       from '../../lib/utils'
+import { toCoverUrl }    from '../../lib/coverImage'
+import api               from '../../lib/api'
 
 function getDaysOverdue(dueDate) {
   if (!dueDate) return 0
@@ -11,20 +12,23 @@ function getDaysOverdue(dueDate) {
 
 export default function BorrowCard({ borrow, book }) {
   const [renewing, setRenewing] = useState(false)
+  const [renewed,  setRenewed]  = useState(false)
   const [toast,    setToast]    = useState(null)
+  const [imgErr,   setImgErr]   = useState(false)
 
-  const isApproved  = borrow.status === 'APPROVED'
-  const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
-  const isOverdue   = daysOverdue > 0
-
-  // Determine the displayed status — show OVERDUE when applicable
+  const isApproved    = borrow.status === 'APPROVED'
+  const daysOverdue   = isApproved ? getDaysOverdue(borrow.dueDate) : 0
+  const isOverdue     = daysOverdue > 0
   const displayStatus = isOverdue ? 'OVERDUE' : borrow.status
+  const coverUrl      = toCoverUrl(book?.coverImageUrl)
 
   async function handleRenew() {
+    if (renewing || renewed) return
     setRenewing(true)
     try {
       await api.post(`/borrows/${borrow.id}/renew`)
-      setToast({ message: 'Renewal request sent to library staff!', type: 'success' })
+      setRenewed(true)
+      setToast({ message: 'Renewal request sent! Staff will reply in your chat.', type: 'success' })
     } catch (err) {
       setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
     } finally {
@@ -39,9 +43,16 @@ export default function BorrowCard({ borrow, book }) {
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
 
       <div className="flex gap-3 items-start">
-        {book?.coverImageUrl
-          ? <img src={book.coverImageUrl} alt={book.title} className="w-10 h-14 object-cover rounded-lg flex-shrink-0"/>
-          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📚</div>
+        {coverUrl && !imgErr
+          ? <img
+              src={coverUrl}
+              alt={book?.title}
+              onError={() => setImgErr(true)}
+              className="w-10 h-14 object-cover rounded-lg flex-shrink-0 bg-green-50"
+            />
+          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">
+              📚
+            </div>
         }
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold text-gray-800 truncate">
@@ -83,16 +94,17 @@ export default function BorrowCard({ borrow, book }) {
         )}
       </div>
 
-      {/* Renew button — only for approved borrows (overdue or not) */}
       {isApproved && (
         <button
           onClick={handleRenew}
-          disabled={renewing}
+          disabled={renewing || renewed}
           className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
-            ${isOverdue
-              ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
-              : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
-          {renewing ? 'Sending request…' : '🔄 Request Renewal'}
+            ${renewed
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              : isOverdue
+                ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
+                : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
+          {renewing ? 'Sending…' : renewed ? '✔ Renewal Requested' : '🔄 Request Renewal'}
         </button>
       )}
     </div>

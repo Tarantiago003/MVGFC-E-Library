@@ -6,8 +6,21 @@ import { rateLimiter } from '../../../../middleware/rateLimiter'
 import { trigger, ch } from '../../../../lib/pusher'
 import { readSheet, appendRow } from '../../../../lib/sheets'
 import {
-  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS, THREAD_STATUS
+  SHEETS, COL, ROLES, BORROW_STATUS, THREAD_STATUS
 } from '../../../../lib/constants'
+
+// In-memory: track last renewal request per borrowId
+// Prevents spam even across multiple button taps before client lock kicks in
+const renewalCache = new Map()  // key: borrowId, value: timestamp
+const RENEWAL_COOLDOWN = 24 * 60 * 60 * 1000  // 24 hours
+
+// Cleanup old entries every hour
+setInterval(() => {
+  const cutoff = Date.now() - RENEWAL_COOLDOWN
+  for (const [key, ts] of renewalCache.entries()) {
+    if (ts < cutoff) renewalCache.delete(key)
+  }
+}, 60 * 60 * 1000)
 
 async function handlerRenew(req, res) {
   if (req.method !== 'POST')
@@ -17,6 +30,18 @@ async function handlerRenew(req, res) {
     httpError(403, 'Only borrowers can request renewals')
 
   const { id } = req.query
+
+  // Server-side cooldown check
+  const cacheKey  = `${req.user.id}:${id}`
+  const lastSent  = renewalCache.get(cacheKey)
+  if (lastSent && (Date.now() - lastSent) < RENEWAL_COOLDOWN) {
+    const hoursAgo = Math.floor((Date.now() - lastSent) / 3600000)
+    return res.status(429).json({
+      success: false,
+      error: `You already sent a renewal request ${hoursAgo}h ago. Please wait for staff to respond.`
+    })
+  }
+
   const borrows = await readSheet(SHEETS.BORROWS)
   const borrow  = borrows.find(r => r[COL.BORROWS.ID] === id)
 
@@ -34,16 +59,15 @@ async function handlerRenew(req, res) {
     ? new Date(dueDate).toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })
     : 'N/A'
 
-  // Message posted to the user's own chat thread so staff can see & respond
   const chatText = `📖 Renewal Request — Hi! I would like to request a renewal for Assc. No. ${bookId}. Current due date: ${formattedDue}. Please let me know if it can be extended. Thank you!`
+  const chatId   = uuid()
 
-  const chatId = uuid()
   await appendRow(SHEETS.CHAT, [
     chatId,
-    req.user.id,        // threadId = userId
-    req.user.id,        // senderId
-    ROLES.USER,         // senderRole
-    'INQUIRY',          // messageType
+    req.user.id,
+    req.user.id,
+    ROLES.USER,
+    'INQUIRY',
     chatText,
     timestamp,
     'FALSE',
@@ -51,7 +75,9 @@ async function handlerRenew(req, res) {
     location
   ])
 
-  // Real-time: update user's own chat page
+  // Record in cache AFTER successful write
+  renewalCache.set(cacheKey, Date.now())
+
   await trigger(ch.chat(req.user.id), 'new-message', {
     id:          chatId,
     threadId:    req.user.id,
@@ -63,7 +89,6 @@ async function handlerRenew(req, res) {
     libraryLocation: location
   })
 
-  // Real-time: notify admin inbox (thread list refresh)
   await trigger(ch.adminInbox(location), 'new-chat-message', {
     threadId: req.user.id,
     userName: req.user.name,

@@ -328,103 +328,6 @@ export default function BorrowFilters({ status, library, search, onChange }) {
 }
 </file>
 
-<file path="components/borrows/BorrowsTable.jsx">
-import StatusBadge from '../ui/StatusBadge'
-import Table       from '../ui/Table'
-
-function fmtDate(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })
-}
-
-function getDaysOverdue(dueDate) {
-  if (!dueDate) return 0
-  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
-}
-
-const COLS = ['Request ID', 'User', 'Book', 'Location', 'Status', 'Requested', 'Due', 'Actions']
-
-export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, users, books }) {
-  const userMap = Object.fromEntries((users || []).map(u => [u.id, u]))
-  const bookMap = Object.fromEntries((books || []).map(b => [b.id, b]))
-
-  return (
-    <Table columns={COLS} caption={`${borrows.length} record(s) found`}>
-      {borrows.map(b => {
-        const u  = userMap[b.userId]
-        const bk = bookMap[b.bookId]
-        const daysOverdue = getDaysOverdue(b.dueDate)
-        const isOverdue   = b.status === 'APPROVED' && daysOverdue > 0
-
-        return (
-          <tr key={b.id} className={`hover:bg-green-50/50 transition ${isOverdue ? 'bg-red-50/30' : ''}`}>
-            <td className="px-4 py-3">
-              <span className="font-mono text-xs text-gray-400">{b.id.slice(0, 8)}…</span>
-            </td>
-            <td className="px-4 py-3">
-              <p className="font-medium text-sm text-gray-800">{u?.name || '—'}</p>
-              <p className="text-xs text-gray-400">{u?.email}</p>
-            </td>
-            <td className="px-4 py-3 max-w-[180px]">
-              <p className="font-medium text-sm text-gray-800 truncate">{bk?.title || `Assc. No. ${b.bookId}`}</p>
-              <p className="text-xs text-gray-400 truncate">{bk?.author}</p>
-            </td>
-            <td className="px-4 py-3">
-              <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
-                {b.location === 'HIGH_SCHOOL' ? '🏫 HS Dept' : '📚 Main'}
-              </span>
-            </td>
-            <td className="px-4 py-3">
-              <div className="flex flex-col gap-1 items-start">
-                {/* Show OVERDUE badge when past due, else normal status */}
-                <StatusBadge status={isOverdue ? 'OVERDUE' : b.status}/>
-                {isOverdue && (
-                  <span className="text-[10px] text-red-600 font-semibold">
-                    {daysOverdue}d past due
-                  </span>
-                )}
-              </div>
-            </td>
-            <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{fmtDate(b.requestDate)}</td>
-            <td className="px-4 py-3">
-              <p className={`text-xs whitespace-nowrap font-medium
-                ${isOverdue ? 'text-red-600' : 'text-gray-500'}`}>
-                {fmtDate(b.dueDate)}
-              </p>
-            </td>
-            <td className="px-4 py-3">
-              <div className="flex gap-1.5 items-center">
-                {b.status === 'PENDING' && (
-                  <>
-                    <button onClick={() => onApprove(b)}
-                      className="text-xs bg-green-700 text-white px-2.5 py-1 rounded-lg font-semibold hover:bg-green-800 transition">
-                      Approve
-                    </button>
-                    <button onClick={() => onReject(b)}
-                      className="text-xs bg-red-500 text-white px-2.5 py-1 rounded-lg font-semibold hover:bg-red-600 transition">
-                      Reject
-                    </button>
-                  </>
-                )}
-                {b.status === 'APPROVED' && (
-                  <button onClick={() => onReturn(b)}
-                    className="text-xs bg-blue-600 text-white px-2.5 py-1 rounded-lg font-semibold hover:bg-blue-700 transition">
-                    ↩ Return
-                  </button>
-                )}
-                {['REJECTED', 'RETURNED'].includes(b.status) && (
-                  <span className="text-xs text-gray-300 italic">No action</span>
-                )}
-              </div>
-            </td>
-          </tr>
-        )
-      })}
-    </Table>
-  )
-}
-</file>
-
 <file path="components/borrows/RejectModal.jsx">
 import { useState } from 'react'
 import Modal        from '../ui/Modal'
@@ -799,117 +702,6 @@ export default function MessageBubble({ msg, isOwn }) {
 }
 </file>
 
-<file path="components/chat/ThreadList.jsx">
-import ComplaintTag from './ComplaintTag'
-import { useState, useEffect } from 'react'
-
-function fmtTime(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  const now = new Date()
-  if (d.toDateString() === now.toDateString())
-    return d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
-  return d.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })
-}
-
-export default function ThreadList({ threads, activeThread, onSelect, loading }) {
-  const [users, setUsers] = useState({})
-
-  useEffect(() => {
-    if (!threads.length) return
-    async function fetchUsers() {
-      try {
-        const res  = await fetch('/api/users')
-        const data = await res.json()
-        if (data.success) {
-          const map = {}
-          data.data.forEach(u => { map[u.id] = u })
-          setUsers(map)
-        }
-      } catch (err) {
-        console.error('Failed to fetch users:', err)
-      }
-    }
-    fetchUsers()
-  }, [threads])
-
-  if (loading) {
-    return (
-      <div className="flex flex-col gap-2 p-3">
-        {[...Array(5)].map((_, i) => (
-          <div key={i} className="h-16 bg-green-50 rounded-xl animate-pulse"/>
-        ))}
-      </div>
-    )
-  }
-
-  if (!threads.length) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full text-center p-6">
-        <span className="text-4xl mb-3">💬</span>
-        <p className="text-sm font-semibold text-green-800">No conversations yet</p>
-        <p className="text-xs text-gray-400 mt-1">User messages will appear here in real-time.</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex-1 overflow-y-auto">
-      {threads.map(t => {
-        const isActive   = t.threadId === activeThread
-        const isResolved = t.threadStatus === 'RESOLVED'
-        const libraryIcon = t.library === 'HIGH_SCHOOL' ? '🏫' : '📚'
-
-        // Use userId field (set by API) for name lookup — works for both
-        // old (threadId=userId) and new (threadId=UUID) ticket styles
-        const user     = users[t.userId] || null
-        const userName = user?.name || `User ${(t.userId || t.threadId).slice(0, 8)}`
-
-        return (
-          <button key={t.threadId} onClick={() => onSelect(t.threadId)}
-            className={`w-full text-left px-4 py-3.5 border-b border-green-50 hover:bg-green-50
-              transition flex gap-3 items-start
-              ${isActive ? 'bg-green-100 border-l-4 border-l-green-600' : ''}`}>
-
-            <div className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center
-              text-xs font-bold text-white ${isActive ? 'bg-green-700' : 'bg-green-500'}`}>
-              {userName.charAt(0).toUpperCase()}
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-2">
-                <p className={`text-sm font-semibold truncate ${isActive ? 'text-green-800' : 'text-gray-800'}`}>
-                  {libraryIcon} {userName}
-                </p>
-                <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtTime(t.lastTimestamp)}</span>
-              </div>
-
-              <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                <ComplaintTag type={t.messageType}/>
-                {isResolved && (
-                  <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">
-                    ✔ Resolved
-                  </span>
-                )}
-              </div>
-
-              <p className="text-xs text-gray-500 mt-1 truncate">{t.lastMessage}</p>
-            </div>
-
-            {t.unreadCount > 0 && (
-              <span className="flex-shrink-0 w-5 h-5 bg-red-500 text-white text-[10px]
-                font-bold rounded-full flex items-center justify-center">
-                {t.unreadCount > 9 ? '9+' : t.unreadCount}
-              </span>
-            )}
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-</file>
-
 <file path="components/guards/RoleGuard.jsx">
 import { useSession } from 'next-auth/react'
 
@@ -1248,31 +1040,6 @@ export default function StatCard({ label, value, icon, color = 'green', trend })
 }
 </file>
 
-<file path="components/ui/StatusBadge.jsx">
-const META = {
-  PENDING:   { label: 'Pending',   cls: 'bg-yellow-100 text-yellow-800', dot: 'bg-yellow-400 animate-pulse' },
-  APPROVED:  { label: 'Approved',  cls: 'bg-green-100  text-green-800',  dot: 'bg-green-500' },
-  OVERDUE:   { label: 'Overdue',   cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500 animate-pulse' },
-  REJECTED:  { label: 'Rejected',  cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500' },
-  RETURNED:  { label: 'Returned',  cls: 'bg-blue-100   text-blue-800',   dot: 'bg-blue-400' },
-  OPEN:      { label: 'Open',      cls: 'bg-orange-100 text-orange-800', dot: 'bg-orange-400' },
-  RESOLVED:  { label: 'Resolved',  cls: 'bg-gray-100   text-gray-600',   dot: 'bg-gray-400' },
-  active:    { label: 'Active',    cls: 'bg-green-100  text-green-800',  dot: 'bg-green-500' },
-  inactive:  { label: 'Inactive',  cls: 'bg-gray-100   text-gray-600',   dot: 'bg-gray-400' },
-  suspended: { label: 'Suspended', cls: 'bg-red-100    text-red-700',    dot: 'bg-red-500' }
-}
-
-export default function StatusBadge({ status }) {
-  const m = META[status] || { label: status, cls: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' }
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${m.cls}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${m.dot}`}/>
-      {m.label}
-    </span>
-  )
-}
-</file>
-
 <file path="components/ui/Table.jsx">
 export default function Table({ columns, children, caption }) {
   return (
@@ -1516,116 +1283,6 @@ export function useBorrows(filters = {}) {
 }
 </file>
 
-<file path="hooks/useChat.js">
-import useSWR, { mutate } from 'swr'
-import api from '../lib/api'
-import { useEffect, useRef, useState } from 'react'
-import { subscribeChannel } from '../lib/pusher-client'
-import { useSession } from 'next-auth/react'
-
-const fetcher = url => api.get(url).then(d => d.data)
-const THREADS_KEY = '/chat/threads/me'
-
-export function useChat() {
-  const { data: session } = useSession()
-  const userId = session?.user?.id
-
-  const [activeThreadId, setActiveThreadId] = useState(null)
-
-  const sendingRef       = useRef(false)
-  const lastSendTimeRef  = useRef(0)
-  const messageQueueRef  = useRef(null)
-
-  // All user's ticket summaries
-  const { data: threads, error: threadsError, isLoading: threadsLoading } = useSWR(
-    THREADS_KEY, fetcher, { revalidateOnFocus: false }
-  )
-
-  // Messages for the active thread
-  const threadMsgKey = activeThreadId ? `/chat/threads/${activeThreadId}` : null
-  const { data: messages, isLoading: messagesLoading } = useSWR(threadMsgKey, fetcher, {
-    revalidateOnFocus: false
-  })
-
-  // Real-time: staff reply arrives on ANY of the user's threads
-  useEffect(() => {
-    if (!userId) return
-    return subscribeChannel(`user-notif-${userId}`, 'chat-reply', ({ threadId }) => {
-      // Refresh the thread list (unread counts change)
-      mutate(THREADS_KEY)
-      // If the active thread got a reply, also refresh its messages
-      if (threadId && threadId === activeThreadId) {
-        mutate(`/chat/threads/${activeThreadId}`)
-      }
-    })
-  }, [userId, activeThreadId])
-
-  // Real-time: new message pushed directly to a thread channel
-  useEffect(() => {
-    if (!activeThreadId) return
-    return subscribeChannel(`chat-${activeThreadId}`, 'new-message', (msg) => {
-      mutate(threadMsgKey, prev => {
-        const existing = prev || []
-        if (existing.some(m => m.id === msg.id)) return existing
-        return [...existing, msg]
-      }, false)
-      mutate(THREADS_KEY) // keep thread list fresh
-    })
-  }, [activeThreadId, threadMsgKey])
-
-  async function sendMessage(messageText, messageType, library, threadId) {
-    // threadId can be explicitly passed (for new tickets) or defaults to activeThreadId
-    const targetThread = threadId || activeThreadId
-
-    if (sendingRef.current)
-      return Promise.reject(new Error('Send already in progress'))
-    const now = Date.now()
-    if (now - lastSendTimeRef.current < 1000)
-      return Promise.reject(new Error('Please wait before sending'))
-    if (messageQueueRef.current === messageText)
-      return Promise.reject(new Error('Message already queued'))
-
-    sendingRef.current    = true
-    lastSendTimeRef.current = now
-    messageQueueRef.current = messageText
-
-    try {
-      const body = {
-        threadId:    targetThread,
-        messageText,
-        ...(messageType && { messageType }),
-        ...(library    && { library })
-      }
-      const res = await api.post('/chat/messages', body)
-
-      // Switch active thread to the newly created/sent-to thread
-      if (targetThread !== activeThreadId) setActiveThreadId(targetThread)
-
-      mutate(THREADS_KEY)
-      if (targetThread) mutate(`/chat/threads/${targetThread}`)
-      return res
-    } catch (err) {
-      throw err
-    } finally {
-      setTimeout(() => {
-        sendingRef.current    = false
-        messageQueueRef.current = null
-      }, 1500)
-    }
-  }
-
-  return {
-    threads:        threads  || [],
-    threadsLoading,
-    messages:       messages || [],
-    messagesLoading,
-    activeThreadId,
-    setActiveThreadId,
-    sendMessage
-  }
-}
-</file>
-
 <file path="hooks/useDashboardBorrows.js">
 import useSWR, { mutate } from 'swr'
 import { useEffect }      from 'react'
@@ -1663,113 +1320,6 @@ export function useDashboardBorrows() {
   return {
     borrows: data || [], loading: isLoading, error,
     approveBorrow, rejectBorrow, returnBorrow
-  }
-}
-</file>
-
-<file path="hooks/useDashboardChat.js">
-import useSWR, { mutate } from 'swr'
-import { useEffect, useState, useRef } from 'react'
-import api                from '../lib/api'
-import { subscribeChannel } from '../lib/pusher-client'
-
-const THREADS_KEY = '/chat/threads'
-const fetcher     = url => api.get(url).then(d => d.data)
-
-export function useDashboardChat() {
-  const [activeThread, setActiveThread] = useState(null)
-  
-  const sendLockRef = useRef(false)
-  const lastSendTimeRef = useRef(0)
-  const messageQueueRef = useRef(null)
-
-  const { data: threads = [], isLoading: threadsLoading } = useSWR(
-    THREADS_KEY, fetcher, { revalidateOnFocus: true }
-  )
-  const threadMsgKey = activeThread ? `/chat/threads/${activeThread}` : null
-  const { data: messages = [], isLoading: msgsLoading } = useSWR(threadMsgKey, fetcher)
-
-  // Real-time: new message in any thread → refresh thread list unread counts
-  useEffect(() => {
-    return subscribeChannel('admin-inbox', 'new-chat-message', ({ threadId }) => {
-      mutate(THREADS_KEY)
-      if (threadId === activeThread) mutate(`/chat/threads/${activeThread}`)
-    })
-  }, [activeThread])
-
-  // Real-time: new message in the active thread
-  useEffect(() => {
-    if (!activeThread) return
-    return subscribeChannel(`chat-${activeThread}`, 'new-message', (msg) => {
-      // 🔥 FIX: Check for duplicates before adding
-      mutate(threadMsgKey, prev => {
-        const existing = prev || []
-        // Don't add if message ID already exists
-        if (existing.some(m => m.id === msg.id)) {
-          console.log('🔒 Duplicate message blocked (Pusher):', msg.id)
-          return existing
-        }
-        return [...existing, msg]
-      }, false)
-      mutate(THREADS_KEY)
-    })
-  }, [activeThread, threadMsgKey])
-
-  async function sendReply(text) {
-    if (!activeThread) {
-      console.log('🔒 No active thread')
-      return Promise.reject(new Error('No active thread'))
-    }
-    
-    if (sendLockRef.current) {
-      console.log('🔒 useDashboardChat LOCKED - already sending')
-      return Promise.reject(new Error('Send already in progress'))
-    }
-
-    const now = Date.now()
-    if (now - lastSendTimeRef.current < 1000) {
-      console.log('🔒 useDashboardChat LOCKED - debounce')
-      return Promise.reject(new Error('Please wait before sending'))
-    }
-
-    if (messageQueueRef.current === text) {
-      console.log('🔒 useDashboardChat LOCKED - duplicate in queue')
-      return Promise.reject(new Error('Message already queued'))
-    }
-
-    sendLockRef.current = true
-    lastSendTimeRef.current = now
-    messageQueueRef.current = text
-
-    try {
-      const res = await api.post('/chat/messages', {
-        threadId: activeThread,
-        messageText: text
-      })
-      
-      return res
-    } catch (err) {
-      console.error('useDashboardChat send error:', err)
-      throw err
-    } finally {
-      setTimeout(() => {
-        sendLockRef.current = false
-        messageQueueRef.current = null
-      }, 1500)
-    }
-  }
-
-  async function resolveThread(threadId) {
-    await api.patch(`/chat/threads/${threadId}/resolve`)
-    mutate(THREADS_KEY)
-    mutate(`/chat/threads/${threadId}`)
-  }
-
-  return {
-    threads, threadsLoading,
-    messages, msgsLoading,
-    activeThread, setActiveThread,
-    sendReply, resolveThread
   }
 }
 </file>
@@ -1980,17 +1530,6 @@ export const ch = {
   userNotif:  (userId)   => `user-notif-${userId}`,
   adminInbox: (library = 'all') => library === 'all' ? 'admin-inbox' : `admin-inbox-${library}`,
   borrowStat: (userId)   => `borrow-status-${userId}`
-}
-</file>
-
-<file path="lib/queue.js">
-let chain = Promise.resolve()
-
-
-export function enqueue(fn) {
-  return new Promise((resolve, reject) => {
-    chain = chain.then(() => fn().then(resolve).catch(reject))
-  })
 }
 </file>
 
@@ -3029,367 +2568,6 @@ async function handler(req, res) {
 }
 
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
-</file>
-
-<file path="pages/api/chat/messages.js">
-import Joi from 'joi'
-import { v4 as uuid }  from 'uuid'
-import { compose }     from '../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
-import { withAuth }    from '../../../middleware/withAuth'
-import { rateLimiter } from '../../../middleware/rateLimiter'
-import { trigger, ch } from '../../../lib/pusher'
-import { appendRow, readSheet } from '../../../lib/sheets'
-import { SHEETS, COL, ROLES, MSG_TYPE, THREAD_STATUS, NOTIF_TYPE, LIBRARY } from '../../../lib/constants'
-
-const schema = Joi.object({
-  threadId:    Joi.string().required(),
-  messageText: Joi.string().max(1000).required(),
-  messageType: Joi.string().valid(...Object.values(MSG_TYPE)).optional(),
-  library:     Joi.string().valid(...Object.values(LIBRARY)).optional()
-})
-
-// In-memory duplicate detection
-const recentMessages = new Map()
-const DUPLICATE_WINDOW = 5000
-
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, ts] of recentMessages.entries()) {
-    if (now - ts > DUPLICATE_WINDOW) recentMessages.delete(key)
-  }
-}, 10000)
-
-async function handler(req, res) {
-  if (req.method !== 'POST')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  const { error, value } = schema.validate(req.body)
-  if (error) httpError(400, error.details[0].message)
-
-  const { threadId, messageText, messageType, library } = value
-  const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
-
-  // For users: verify they own the thread (have previously sent to it)
-  // For staff: no restriction — they can reply to any thread
-  if (!isStaff) {
-    const rows = await readSheet(SHEETS.CHAT)
-    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
-    if (threadRows.length > 0) {
-      // Existing thread — must be the owner
-      const isOwner = threadRows.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
-      if (!isOwner) httpError(403, 'You can only send messages in your own threads')
-    }
-    // threadRows.length === 0 means this is a brand new thread — allow it
-  }
-
-  // Duplicate detection
-  const dupKey  = `${threadId}:${req.user.id}:${messageText.trim()}`
-  const lastSent = recentMessages.get(dupKey)
-  const now      = Date.now()
-
-  if (lastSent && (now - lastSent) < DUPLICATE_WINDOW) {
-    console.log('Server blocked duplicate:', dupKey)
-    return res.status(200).json({
-      success: true,
-      message: 'Duplicate message blocked',
-      data: { id: 'DUPLICATE_BLOCKED' }
-    })
-  }
-  recentMessages.set(dupKey, now)
-
-  // Determine library location
-  let libraryLocation = library || LIBRARY.MAIN_LIBRARY
-  if (isStaff) libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
-
-  const msgId       = uuid()
-  const timestamp   = new Date().toISOString()
-  const threadStatus = THREAD_STATUS.OPEN
-
-  await appendRow(SHEETS.CHAT, [
-    msgId, threadId, req.user.id, req.user.role,
-    messageType || '', messageText,
-    timestamp, 'FALSE', threadStatus, libraryLocation
-  ])
-
-  const payload = {
-    id:          msgId,
-    threadId,
-    senderId:    req.user.id,
-    senderName:  req.user.name,
-    senderRole:  req.user.role,
-    messageText,
-    timestamp,
-    libraryLocation
-  }
-
-  // Broadcast to thread channel (both user + staff subscribe to this)
-  await trigger(ch.chat(threadId), 'new-message', payload)
-
-  if (isStaff) {
-    // Find the thread owner (first user-role sender)
-    const rows = await readSheet(SHEETS.CHAT)
-    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
-    const ownerRow   = threadRows.find(r => r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
-    const ownerId    = ownerRow?.[COL.CHAT.SENDER_ID]
-
-    if (ownerId) {
-      // Notify the user
-      await trigger(ch.userNotif(ownerId), 'chat-reply', {
-        threadId,
-        title:   'New reply from library staff',
-        message: messageText.substring(0, 80)
-      })
-      await appendRow(SHEETS.NOTIFICATIONS, [
-        uuid(), ownerId, NOTIF_TYPE.CHAT_REPLY,
-        'Library Staff Replied',
-        `Staff replied: "${messageText.substring(0, 60)}${messageText.length > 60 ? '…' : ''}"`,
-        msgId, 'FALSE', timestamp
-      ])
-    }
-  } else {
-    // User sent — notify admin/clerk inbox
-    await trigger(ch.adminInbox(libraryLocation), 'new-chat-message', {
-      threadId,
-      userId:   req.user.id,
-      userName: req.user.name,
-      preview:  messageText.substring(0, 80),
-      library:  libraryLocation
-    })
-  }
-
-  res.status(201).json({ success: true, data: payload })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
-</file>
-
-<file path="pages/api/chat/threads/[threadId]/index.js">
-import { compose }     from '../../../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../../../middleware/errorHandler'
-import { withAuth }    from '../../../../../middleware/withAuth'
-import { rateLimiter } from '../../../../../middleware/rateLimiter'
-import { readSheet, batchUpdate, cellRange } from '../../../../../lib/sheets'
-import { SHEETS, COL, ROLES } from '../../../../../lib/constants'
-
-export function toMessage(r) {
-  return {
-    id:           r[COL.CHAT.ID],
-    threadId:     r[COL.CHAT.THREAD_ID],
-    senderId:     r[COL.CHAT.SENDER_ID],
-    senderRole:   r[COL.CHAT.SENDER_ROLE],
-    messageType:  r[COL.CHAT.MSG_TYPE],
-    messageText:  r[COL.CHAT.TEXT],
-    timestamp:    r[COL.CHAT.TIMESTAMP],
-    isRead:       r[COL.CHAT.IS_READ] === 'TRUE',
-    threadStatus: r[COL.CHAT.THREAD_STATUS]
-  }
-}
-
-async function handlerThread(req, res) {
-  if (req.method !== 'GET')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  const { threadId } = req.query
-  const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
-
-  const rows = await readSheet(SHEETS.CHAT)
-  let msgs = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
-  if (!msgs.length) httpError(404, 'Thread not found')
-
-  // Users: verify ownership via senderId (works for UUID threads too)
-  if (!isStaff) {
-    const isOwner = msgs.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
-    if (!isOwner) httpError(403, 'Access denied')
-  }
-
-  // Clerks: library-based filtering
-  if (req.user.role === ROLES.CLERK) {
-    const assignedLibrary = req.user.assignedLibrary
-    if (!assignedLibrary)
-      return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
-    const threadLibrary = msgs[0]?.[COL.CHAT.LIBRARY_LOCATION]
-    if (threadLibrary && threadLibrary !== assignedLibrary)
-      return res.status(403).json({
-        success: false,
-        error: `This conversation belongs to a different library.`
-      })
-  }
-
-  // Mark messages as read (staff viewing user messages)
-  if (isStaff) {
-    const unread = msgs
-      .map((r, _) => ({ r, sheetRow: rows.indexOf(r) + 2 }))
-      .filter(({ r }) => r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
-
-    if (unread.length) {
-      const updates = unread.map(({ sheetRow }) => ({
-        range:  cellRange(SHEETS.CHAT, sheetRow, COL.CHAT.IS_READ),
-        values: ['TRUE']
-      }))
-      await batchUpdate(updates)
-    }
-  }
-
-  res.json({ success: true, data: msgs.map(toMessage), total: msgs.length })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerThread)
-</file>
-
-<file path="pages/api/chat/threads/[threadId]/resolve.js">
-import { compose }     from '../../../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../../../middleware/errorHandler'
-import { withAuth }    from '../../../../../middleware/withAuth'
-import { withRole }    from '../../../../../middleware/withRole'
-import { rateLimiter } from '../../../../../middleware/rateLimiter'
-import { readSheet, updateRange, cellRange } from '../../../../../lib/sheets'
-import { SHEETS, COL, ROLES, THREAD_STATUS } from '../../../../../lib/constants'
-
-async function handlerResolve(req, res) {
-  if (req.method !== 'PATCH')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  const { threadId } = req.query
-  const rows = await readSheet(SHEETS.CHAT)
-
-  const threadRows = rows
-    .map((r, i) => ({ r, sheetRow: i + 2 }))
-    .filter(({ r }) => r[COL.CHAT.THREAD_ID] === threadId)
-
-  if (!threadRows.length) httpError(404, 'Thread not found')
-
-  // Update THREAD_STATUS on the last row of this thread
-  const last = threadRows[threadRows.length - 1]
-  await updateRange(
-    cellRange(SHEETS.CHAT, last.sheetRow, COL.CHAT.THREAD_STATUS),
-    [THREAD_STATUS.RESOLVED]
-  )
-
-  res.json({ success: true, message: 'Thread marked as resolved' })
-}
-
-export default compose(
-  withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
-)(handlerResolve)
-</file>
-
-<file path="pages/api/chat/threads/index.js">
-import { compose }     from '../../../../lib/compose'
-import { withErrorHandler } from '../../../../middleware/errorHandler'
-import { withAuth }    from '../../../../middleware/withAuth'
-import { withRole }    from '../../../../middleware/withRole'
-import { rateLimiter } from '../../../../middleware/rateLimiter'
-import { readSheet }   from '../../../../lib/sheets'
-import { SHEETS, COL, ROLES } from '../../../../lib/constants'
-
-async function handler(req, res) {
-  if (req.method !== 'GET')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  const rows = await readSheet(SHEETS.CHAT)
-  const threadMap = new Map()
-
-  for (const r of rows) {
-    const tid        = r[COL.CHAT.THREAD_ID]
-    const msgLibrary = r[COL.CHAT.LIBRARY_LOCATION]
-
-    if (req.user.role === ROLES.CLERK) {
-      const assignedLibrary = req.user.assignedLibrary
-      if (!assignedLibrary)
-        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
-      if (msgLibrary && msgLibrary !== assignedLibrary) continue
-    }
-
-    if (!threadMap.has(tid)) threadMap.set(tid, { threadId: tid, messages: [], unread: 0 })
-    const t = threadMap.get(tid)
-    t.messages.push(r)
-    if (r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER) t.unread++
-  }
-
-  const threads = [...threadMap.values()].map(t => {
-    const last = t.messages[t.messages.length - 1]
-
-    // userId = first user-role sender — works for both old (threadId=userId)
-    // and new (threadId=UUID) style threads
-    const firstUserMsg = t.messages.find(m => m[COL.CHAT.SENDER_ROLE] === ROLES.USER)
-    const userId = firstUserMsg?.[COL.CHAT.SENDER_ID] || t.threadId
-
-    return {
-      threadId:      t.threadId,
-      userId,                          // used by ThreadList for name lookup
-      lastMessage:   last[COL.CHAT.TEXT],
-      lastTimestamp: last[COL.CHAT.TIMESTAMP],
-      threadStatus:  last[COL.CHAT.THREAD_STATUS],
-      unreadCount:   t.unread,
-      messageType:   t.messages[0][COL.CHAT.MSG_TYPE],
-      library:       last[COL.CHAT.LIBRARY_LOCATION]
-    }
-  })
-
-  threads.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp))
-  res.json({ success: true, data: threads, total: threads.length })
-}
-
-export default compose(
-  withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
-)(handler)
-</file>
-
-<file path="pages/api/chat/threads/me.js">
-import { compose }     from '../../../../lib/compose'
-import { withErrorHandler } from '../../../../middleware/errorHandler'
-import { withAuth }    from '../../../../middleware/withAuth'
-import { rateLimiter } from '../../../../middleware/rateLimiter'
-import { readSheet }   from '../../../../lib/sheets'
-import { SHEETS, COL, ROLES } from '../../../../lib/constants'
-
-async function handlerMe(req, res) {
-  if (req.method !== 'GET')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  const rows = await readSheet(SHEETS.CHAT)
-
-  // Find all threadIds where this user has sent at least one message
-  const myThreadIds = new Set(
-    rows
-      .filter(r => r[COL.CHAT.SENDER_ID] === req.user.id)
-      .map(r => r[COL.CHAT.THREAD_ID])
-  )
-
-  // Group all rows for those threads
-  const threadMap = new Map()
-  for (const r of rows) {
-    const tid = r[COL.CHAT.THREAD_ID]
-    if (!myThreadIds.has(tid)) continue
-    if (!threadMap.has(tid)) threadMap.set(tid, [])
-    threadMap.get(tid).push(r)
-  }
-
-  const threads = [...threadMap.entries()].map(([tid, msgs]) => {
-    const last         = msgs[msgs.length - 1]
-    const firstUserMsg = msgs.find(m => m[COL.CHAT.SENDER_ROLE] === ROLES.USER)
-    // Unread = messages NOT sent by this user that they haven't read
-    const unreadCount  = msgs.filter(m =>
-      m[COL.CHAT.IS_READ] === 'FALSE' && m[COL.CHAT.SENDER_ID] !== req.user.id
-    ).length
-
-    return {
-      threadId:      tid,
-      lastMessage:   last[COL.CHAT.TEXT],
-      lastTimestamp: last[COL.CHAT.TIMESTAMP],
-      threadStatus:  last[COL.CHAT.THREAD_STATUS],
-      messageType:   firstUserMsg?.[COL.CHAT.MSG_TYPE] || '',
-      library:       last[COL.CHAT.LIBRARY_LOCATION] || '',
-      unreadCount
-    }
-  })
-
-  threads.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp))
-  res.json({ success: true, data: threads, total: threads.length })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
 </file>
 
 <file path="pages/api/hello.ts">
@@ -6498,49 +5676,6 @@ module.exports = {
 </html>
 </file>
 
-<file path="README.md">
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
-
-## Getting Started
-
-First, run the development server:
-
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `pages/index.tsx`. The page auto-updates as you edit the file.
-
-[API routes](https://nextjs.org/docs/api-routes/introduction) can be accessed on [http://localhost:3000/api/hello](http://localhost:3000/api/hello). This endpoint can be edited in `pages/api/hello.ts`.
-
-The `pages/api` directory is mapped to `/api/*`. Files in this directory are treated as [API routes](https://nextjs.org/docs/api-routes/introduction) instead of React pages.
-
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
-
-## Deploy on Render
-
-The easiest way to deploy your Next.js app is to use the [Render Platform](https://Render.com) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
-</file>
-
 <file path="styles/Home.module.css">
 .page {
   --gray-rgb: 0, 0, 0;
@@ -6809,105 +5944,99 @@ node_modules/
 .DS_Store
 </file>
 
-<file path="components/borrow/BorrowCard.jsx">
-import { useState }  from 'react'
-import StatusBadge    from '../ui/StatusBadge'
-import Toast          from '../ui/Toast'
-import { fmtDate }    from '../../lib/utils'
-import api            from '../../lib/api'
+<file path="components/borrows/BorrowsTable.jsx">
+import StatusBadge from '../ui/StatusBadge'
+import Table       from '../ui/Table'
+
+function fmtDate(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' })
+}
 
 function getDaysOverdue(dueDate) {
   if (!dueDate) return 0
   return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
 }
 
-export default function BorrowCard({ borrow, book }) {
-  const [renewing, setRenewing] = useState(false)
-  const [toast,    setToast]    = useState(null)
+const COLS = ['Request ID', 'User', 'Book', 'Location', 'Status', 'Requested', 'Due', 'Actions']
 
-  const isApproved  = borrow.status === 'APPROVED'
-  const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
-  const isOverdue   = daysOverdue > 0
-
-  // Determine the displayed status — show OVERDUE when applicable
-  const displayStatus = isOverdue ? 'OVERDUE' : borrow.status
-
-  async function handleRenew() {
-    setRenewing(true)
-    try {
-      await api.post(`/borrows/${borrow.id}/renew`)
-      setToast({ message: 'Renewal request sent to library staff!', type: 'success' })
-    } catch (err) {
-      setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
-    } finally {
-      setRenewing(false)
-    }
-  }
+export default function BorrowsTable({ borrows, onApprove, onReject, onReturn, users, books }) {
+  const userMap = Object.fromEntries((users || []).map(u => [u.id, u]))
+  const bookMap = Object.fromEntries((books || []).map(b => [b.id, b]))
 
   return (
-    <div className={`bg-white rounded-2xl border shadow-card p-4
-      ${isOverdue ? 'border-red-200' : 'border-green-100'}`}>
+    <Table columns={COLS} caption={`${borrows.length} record(s) found`}>
+      {borrows.map(b => {
+        const u  = userMap[b.userId]
+        const bk = bookMap[b.bookId]
+        const daysOverdue = getDaysOverdue(b.dueDate)
+        const isOverdue   = b.status === 'APPROVED' && daysOverdue > 0
 
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
-
-      <div className="flex gap-3 items-start">
-        {book?.coverImageUrl
-          ? <img src={book.coverImageUrl} alt={book.title} className="w-10 h-14 object-cover rounded-lg flex-shrink-0"/>
-          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📚</div>
-        }
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-gray-800 truncate">
-            {book?.title || `Assc. No. ${borrow.bookId}`}
-          </p>
-          <p className="text-xs text-gray-500 truncate">{book?.author}</p>
-          <p className="text-xs text-green-700 mt-1">{borrow.location?.replace('_', ' ')}</p>
-        </div>
-
-        <div className="flex flex-col items-end gap-1">
-          <StatusBadge status={displayStatus}/>
-          {isOverdue && (
-            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
-              ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
-              {daysOverdue}d overdue
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-3 pt-3 border-t border-green-50 grid grid-cols-2 gap-2">
-        <div>
-          <p className="text-[10px] text-gray-400 uppercase font-medium">Requested</p>
-          <p className="text-xs text-gray-700">{fmtDate(borrow.requestDate)}</p>
-        </div>
-        {borrow.dueDate && (
-          <div>
-            <p className="text-[10px] text-gray-400 uppercase font-medium">Due Date</p>
-            <p className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-700'}`}>
-              {fmtDate(borrow.dueDate)}
-            </p>
-          </div>
-        )}
-        {borrow.notes && (
-          <div className="col-span-2">
-            <p className="text-[10px] text-gray-400 uppercase font-medium">Note</p>
-            <p className="text-xs text-gray-600">{borrow.notes}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Renew button — only for approved borrows (overdue or not) */}
-      {isApproved && (
-        <button
-          onClick={handleRenew}
-          disabled={renewing}
-          className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
-            ${isOverdue
-              ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
-              : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
-          {renewing ? 'Sending request…' : '🔄 Request Renewal'}
-        </button>
-      )}
-    </div>
+        return (
+          <tr key={b.id} className={`hover:bg-green-50/50 transition ${isOverdue ? 'bg-red-50/30' : ''}`}>
+            <td className="px-4 py-3">
+              <span className="font-mono text-xs text-gray-400">{b.id.slice(0, 8)}…</span>
+            </td>
+            <td className="px-4 py-3">
+              <p className="font-medium text-sm text-gray-800">{u?.name || '—'}</p>
+              <p className="text-xs text-gray-400">{u?.email}</p>
+            </td>
+            <td className="px-4 py-3 max-w-[180px]">
+              <p className="font-medium text-sm text-gray-800 truncate">{bk?.title || `Assc. No. ${b.bookId}`}</p>
+              <p className="text-xs text-gray-400 truncate">{bk?.author}</p>
+            </td>
+            <td className="px-4 py-3">
+              <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
+                {b.location === 'HIGH_SCHOOL' ? '🏫 HS Dept' : '📚 Main'}
+              </span>
+            </td>
+            <td className="px-4 py-3">
+              <div className="flex flex-col gap-1 items-start">
+                {/* Show OVERDUE badge when past due, else normal status */}
+                <StatusBadge status={isOverdue ? 'OVERDUE' : b.status}/>
+                {isOverdue && (
+                  <span className="text-[10px] text-red-600 font-semibold">
+                    {daysOverdue}d past due
+                  </span>
+                )}
+              </div>
+            </td>
+            <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">{fmtDate(b.requestDate)}</td>
+            <td className="px-4 py-3">
+              <p className={`text-xs whitespace-nowrap font-medium
+                ${isOverdue ? 'text-red-600' : 'text-gray-500'}`}>
+                {fmtDate(b.dueDate)}
+              </p>
+            </td>
+            <td className="px-4 py-3">
+              <div className="flex gap-1.5 items-center">
+                {b.status === 'PENDING' && (
+                  <>
+                    <button onClick={() => onApprove(b)}
+                      className="text-xs bg-green-700 text-white px-2.5 py-1 rounded-lg font-semibold hover:bg-green-800 transition">
+                      Approve
+                    </button>
+                    <button onClick={() => onReject(b)}
+                      className="text-xs bg-red-500 text-white px-2.5 py-1 rounded-lg font-semibold hover:bg-red-600 transition">
+                      Reject
+                    </button>
+                  </>
+                )}
+                {b.status === 'APPROVED' && (
+                  <button onClick={() => onReturn(b)}
+                    className="text-xs bg-blue-600 text-white px-2.5 py-1 rounded-lg font-semibold hover:bg-blue-700 transition">
+                    ↩ Return
+                  </button>
+                )}
+                {['REJECTED', 'RETURNED'].includes(b.status) && (
+                  <span className="text-xs text-gray-300 italic">No action</span>
+                )}
+              </div>
+            </td>
+          </tr>
+        )
+      })}
+    </Table>
   )
 }
 </file>
@@ -7132,116 +6261,367 @@ export default function OverduePanel({ borrows, users, books, onSendReminder, on
 }
 </file>
 
-<file path="components/layout/BottomNav.jsx">
-import Link      from 'next/link'
-import { useRouter } from 'next/router'
+<file path="components/chat/ThreadList.jsx">
+import ComplaintTag from './ComplaintTag'
+import { useState, useEffect } from 'react'
 
-const NAV = [
-  { href: '/dashboard', label: 'Home',    icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
-  { href: '/borrow',    label: 'Borrow',  icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
-  { href: '/borrow/status', label: 'Status', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
-  { href: '/chat',      label: 'Chat',    icon: 'M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
-  { href: '/profile',   label: 'Profile', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' }
-]
+function fmtTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const now = new Date()
+  if (d.toDateString() === now.toDateString())
+    return d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })
+}
 
-export default function BottomNav() {
-  const { pathname } = useRouter()
-  return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-green-200 shadow-nav z-30 safe-bottom">
-      <div className="flex max-w-lg mx-auto">
-        {NAV.map(({ href, label, icon }) => {
+export default function ThreadList({ threads, activeThread, onSelect, loading }) {
+  const [users, setUsers] = useState({})
 
-          const active = pathname === href
+  useEffect(() => {
+    if (!threads.length) return
+    async function fetchUsers() {
+      try {
+        const res  = await fetch('/api/users')
+        const data = await res.json()
+        if (data.success) {
+          const map = {}
+          data.data.forEach(u => { map[u.id] = u })
+          setUsers(map)
+        }
+      } catch (err) {
+        console.error('Failed to fetch users:', err)
+      }
+    }
+    fetchUsers()
+  }, [threads])
 
-          return (
-            <Link key={href} href={href}
-              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors
-                ${active ? 'text-green-700' : 'text-gray-400 hover:text-green-600'}`}>
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d={icon}/>
-              </svg>
-              <span className={`text-[10px] font-medium ${active ? 'text-green-800' : ''}`}>{label}</span>
-              {active && <span className="w-1 h-1 rounded-full bg-green-600 mt-0.5"/>}
-            </Link>
-          )
-        })}
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-2 p-3">
+        {[...Array(5)].map((_, i) => (
+          <div key={i} className="h-16 bg-green-50 rounded-xl animate-pulse"/>
+        ))}
       </div>
-    </nav>
+    )
+  }
+
+  if (!threads.length) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-center p-6">
+        <span className="text-4xl mb-3">💬</span>
+        <p className="text-sm font-semibold text-green-800">No conversations yet</p>
+        <p className="text-xs text-gray-400 mt-1">User messages will appear here in real-time.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      {threads.map(t => {
+        const isActive   = t.threadId === activeThread
+        const isResolved = t.threadStatus === 'RESOLVED'
+        const libraryIcon = t.library === 'HIGH_SCHOOL' ? '🏫' : '📚'
+
+        // Use userId field (set by API) for name lookup — works for both
+        // old (threadId=userId) and new (threadId=UUID) ticket styles
+        const user     = users[t.userId] || null
+        const userName = user?.name || `User ${(t.userId || t.threadId).slice(0, 8)}`
+
+        return (
+          <button key={t.threadId} onClick={() => onSelect(t.threadId)}
+            className={`w-full text-left px-4 py-3.5 border-b border-green-50 hover:bg-green-50
+              transition flex gap-3 items-start
+              ${isActive ? 'bg-green-100 border-l-4 border-l-green-600' : ''}`}>
+
+            <div className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center
+              text-xs font-bold text-white ${isActive ? 'bg-green-700' : 'bg-green-500'}`}>
+              {userName.charAt(0).toUpperCase()}
+            </div>
+
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <p className={`text-sm font-semibold truncate ${isActive ? 'text-green-800' : 'text-gray-800'}`}>
+                  {libraryIcon} {userName}
+                </p>
+                <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtTime(t.lastTimestamp)}</span>
+              </div>
+
+              <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                <ComplaintTag type={t.messageType}/>
+                {isResolved && (
+                  <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">
+                    ✔ Resolved
+                  </span>
+                )}
+              </div>
+
+              <p className="text-xs text-gray-500 mt-1 truncate">{t.lastMessage}</p>
+            </div>
+
+            {t.unreadCount > 0 && (
+              <span className="flex-shrink-0 w-5 h-5 bg-red-500 text-white text-[10px]
+                font-bold rounded-full flex items-center justify-center">
+                {t.unreadCount > 9 ? '9+' : t.unreadCount}
+              </span>
+            )}
+          </button>
+        )
+      })}
+    </div>
   )
 }
 </file>
 
-<file path="lib/constants.js">
-export const ROLES = { ADMIN: 'admin', CLERK: 'clerk', USER: 'user' }
-
-export const USER_STATUS = { ACTIVE: 'active', INACTIVE: 'inactive', SUSPENDED: 'suspended' }
-
-export const USER_TYPE = { STUDENT: 'student', EMPLOYEE: 'employee' }
-
-export const BORROW_STATUS = {
-  PENDING: 'PENDING', APPROVED: 'APPROVED',
-  REJECTED: 'REJECTED', RETURNED: 'RETURNED'
+<file path="components/ui/StatusBadge.jsx">
+const META = {
+  PENDING:   { label: 'Pending',   cls: 'bg-yellow-100 text-yellow-800', dot: 'bg-yellow-400 animate-pulse' },
+  APPROVED:  { label: 'Approved',  cls: 'bg-green-100  text-green-800',  dot: 'bg-green-500' },
+  OVERDUE:   { label: 'Overdue',   cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500 animate-pulse' },
+  REJECTED:  { label: 'Rejected',  cls: 'bg-red-100    text-red-800',    dot: 'bg-red-500' },
+  RETURNED:  { label: 'Returned',  cls: 'bg-blue-100   text-blue-800',   dot: 'bg-blue-400' },
+  OPEN:      { label: 'Open',      cls: 'bg-orange-100 text-orange-800', dot: 'bg-orange-400' },
+  RESOLVED:  { label: 'Resolved',  cls: 'bg-gray-100   text-gray-600',   dot: 'bg-gray-400' },
+  active:    { label: 'Active',    cls: 'bg-green-100  text-green-800',  dot: 'bg-green-500' },
+  inactive:  { label: 'Inactive',  cls: 'bg-gray-100   text-gray-600',   dot: 'bg-gray-400' },
+  suspended: { label: 'Suspended', cls: 'bg-red-100    text-red-700',    dot: 'bg-red-500' }
 }
 
-export const LIBRARY = { HIGH_SCHOOL: 'HIGH_SCHOOL', MAIN_LIBRARY: 'MAIN_LIBRARY' }
-
-export const THREAD_STATUS = { OPEN: 'OPEN', RESOLVED: 'RESOLVED' }
-
-export const MSG_TYPE = { INQUIRY: 'INQUIRY', FEEDBACK: 'FEEDBACK', COMPLAINT: 'COMPLAINT' }
-
-export const NOTIF_TYPE = {
-  BORROW_APPROVED:  'BORROW_APPROVED',
-  BORROW_REJECTED:  'BORROW_REJECTED',
-  BORROW_DUE:       'BORROW_DUE',
-  BORROW_RENEWED:   'BORROW_RENEWED',   // NEW — renewal request notification
-  CHAT_REPLY:       'CHAT_REPLY',
-  ACCOUNT_STATUS:   'ACCOUNT_STATUS'
+export default function StatusBadge({ status }) {
+  const m = META[status] || { label: status, cls: 'bg-gray-100 text-gray-600', dot: 'bg-gray-400' }
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${m.cls}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${m.dot}`}/>
+      {m.label}
+    </span>
+  )
 }
+</file>
 
-// Exact Google Sheet tab names
-export const SHEETS = {
-  USERS:         'Users',
-  BOOKS_MAIN:    'Books_MainLibrary',
-  BOOKS_HS:      'Books_HighSchool',
-  BORROWS:       'BorrowRequests',
-  CHAT:          'ChatMessages',
-  NOTIFICATIONS: 'Notifications'
-}
+<file path="hooks/useChat.js">
+import useSWR, { mutate } from 'swr'
+import api from '../lib/api'
+import { useEffect, useRef, useState } from 'react'
+import { subscribeChannel } from '../lib/pusher-client'
+import { useSession } from 'next-auth/react'
 
+const fetcher = url => api.get(url).then(d => d.data)
+const THREADS_KEY = '/chat/threads/me'
 
-export const COL = {
-  USERS: {
-    ID:0, NAME:1, EMAIL:2, ROLE:3, DEPT:4,
-    STATUS:5, GOOGLE_ID:6, CREATED:7, LAST_LOGIN:8,
-    USER_TYPE:9, STUDENT_ID:10, YEAR:11, SECTION:12,
-    EMPLOYEE_NUM:13, POSITION:14, OFFICE:15, ASSIGNED_LIBRARY:16,
-    PASSWORD:17
-  },
-  BOOKS: {
-    // Col 0 label in Sheet: "Assc. No."  |  Col 3 label in Sheet: "Year"
-    ID:0, TITLE:1, AUTHOR:2, YEAR:3, CATEGORY:4, LOCATION:5,
-    TOTAL:6, AVAILABLE:7, DESC:8, COVER:9, ADDED_AT:10, ADDED_BY:11
-  },
-  BORROWS: {
-    ID:0, USER_ID:1, BOOK_ID:2, LOCATION:3, STATUS:4,
-    REQ_DATE:5, APPROVAL_DATE:6, DUE_DATE:7, RETURN_DATE:8,
-    PROCESSED_BY:9, NOTES:10
-  },
-  CHAT: {
-    ID:0, THREAD_ID:1, SENDER_ID:2, SENDER_ROLE:3, MSG_TYPE:4,
-    TEXT:5, TIMESTAMP:6, IS_READ:7, THREAD_STATUS:8, LIBRARY_LOCATION:9
-  },
-  NOTIFS: {
-    ID:0, RECIPIENT_ID:1, TYPE:2, TITLE:3, MESSAGE:4,
-    RELATED_ID:5, IS_READ:6, CREATED:7
+export function useChat() {
+  const { data: session } = useSession()
+  const userId = session?.user?.id
+
+  const [activeThreadId, setActiveThreadId] = useState(null)
+
+  const sendingRef       = useRef(false)
+  const lastSendTimeRef  = useRef(0)
+  const messageQueueRef  = useRef(null)
+
+  // All user's ticket summaries
+  const { data: threads, error: threadsError, isLoading: threadsLoading } = useSWR(
+    THREADS_KEY, fetcher, { revalidateOnFocus: false }
+  )
+
+  // Messages for the active thread
+  const threadMsgKey = activeThreadId ? `/chat/threads/${activeThreadId}` : null
+  const { data: messages, isLoading: messagesLoading } = useSWR(threadMsgKey, fetcher, {
+    revalidateOnFocus: false
+  })
+
+  // Real-time: staff reply arrives on ANY of the user's threads
+  useEffect(() => {
+    if (!userId) return
+    return subscribeChannel(`user-notif-${userId}`, 'chat-reply', ({ threadId }) => {
+      // Refresh the thread list (unread counts change)
+      mutate(THREADS_KEY)
+      // If the active thread got a reply, also refresh its messages
+      if (threadId && threadId === activeThreadId) {
+        mutate(`/chat/threads/${activeThreadId}`)
+      }
+    })
+  }, [userId, activeThreadId])
+
+  // Real-time: new message pushed directly to a thread channel
+  useEffect(() => {
+    if (!activeThreadId) return
+    return subscribeChannel(`chat-${activeThreadId}`, 'new-message', (msg) => {
+      mutate(threadMsgKey, prev => {
+        const existing = prev || []
+        if (existing.some(m => m.id === msg.id)) return existing
+        return [...existing, msg]
+      }, false)
+      mutate(THREADS_KEY) // keep thread list fresh
+    })
+  }, [activeThreadId, threadMsgKey])
+
+  async function sendMessage(messageText, messageType, library, threadId) {
+    // threadId can be explicitly passed (for new tickets) or defaults to activeThreadId
+    const targetThread = threadId || activeThreadId
+
+    if (sendingRef.current)
+      return Promise.reject(new Error('Send already in progress'))
+    const now = Date.now()
+    if (now - lastSendTimeRef.current < 1000)
+      return Promise.reject(new Error('Please wait before sending'))
+    if (messageQueueRef.current === messageText)
+      return Promise.reject(new Error('Message already queued'))
+
+    sendingRef.current    = true
+    lastSendTimeRef.current = now
+    messageQueueRef.current = messageText
+
+    try {
+      const body = {
+        threadId:    targetThread,
+        messageText,
+        ...(messageType && { messageType }),
+        ...(library    && { library })
+      }
+      const res = await api.post('/chat/messages', body)
+
+      // Switch active thread to the newly created/sent-to thread
+      if (targetThread !== activeThreadId) setActiveThreadId(targetThread)
+
+      mutate(THREADS_KEY)
+      if (targetThread) mutate(`/chat/threads/${targetThread}`)
+      return res
+    } catch (err) {
+      throw err
+    } finally {
+      setTimeout(() => {
+        sendingRef.current    = false
+        messageQueueRef.current = null
+      }, 1500)
+    }
+  }
+
+  return {
+    threads:        threads  || [],
+    threadsLoading,
+    messages:       messages || [],
+    messagesLoading,
+    activeThreadId,
+    setActiveThreadId,
+    sendMessage
   }
 }
+</file>
 
-export const LETTER = (n) => String.fromCharCode(65 + n)
+<file path="hooks/useDashboardChat.js">
+import useSWR, { mutate } from 'swr'
+import { useEffect, useState, useRef } from 'react'
+import api                from '../lib/api'
+import { subscribeChannel } from '../lib/pusher-client'
 
-// Helper: Get correct books sheet name based on library location
-export function getBooksSheet(libraryLocation) {
-  return libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+const THREADS_KEY = '/chat/threads'
+const fetcher     = url => api.get(url).then(d => d.data)
+
+export function useDashboardChat() {
+  const [activeThread, setActiveThread] = useState(null)
+  
+  const sendLockRef = useRef(false)
+  const lastSendTimeRef = useRef(0)
+  const messageQueueRef = useRef(null)
+
+  const { data: threads = [], isLoading: threadsLoading } = useSWR(
+    THREADS_KEY, fetcher, { revalidateOnFocus: true }
+  )
+  const threadMsgKey = activeThread ? `/chat/threads/${activeThread}` : null
+  const { data: messages = [], isLoading: msgsLoading } = useSWR(threadMsgKey, fetcher)
+
+  // Real-time: new message in any thread → refresh thread list unread counts
+  useEffect(() => {
+    return subscribeChannel('admin-inbox', 'new-chat-message', ({ threadId }) => {
+      mutate(THREADS_KEY)
+      if (threadId === activeThread) mutate(`/chat/threads/${activeThread}`)
+    })
+  }, [activeThread])
+
+  // Real-time: new message in the active thread
+  useEffect(() => {
+    if (!activeThread) return
+    return subscribeChannel(`chat-${activeThread}`, 'new-message', (msg) => {
+      // 🔥 FIX: Check for duplicates before adding
+      mutate(threadMsgKey, prev => {
+        const existing = prev || []
+        // Don't add if message ID already exists
+        if (existing.some(m => m.id === msg.id)) {
+          console.log('🔒 Duplicate message blocked (Pusher):', msg.id)
+          return existing
+        }
+        return [...existing, msg]
+      }, false)
+      mutate(THREADS_KEY)
+    })
+  }, [activeThread, threadMsgKey])
+
+  async function sendReply(text) {
+    if (!activeThread) {
+      console.log('🔒 No active thread')
+      return Promise.reject(new Error('No active thread'))
+    }
+    
+    if (sendLockRef.current) {
+      console.log('🔒 useDashboardChat LOCKED - already sending')
+      return Promise.reject(new Error('Send already in progress'))
+    }
+
+    const now = Date.now()
+    if (now - lastSendTimeRef.current < 1000) {
+      console.log('🔒 useDashboardChat LOCKED - debounce')
+      return Promise.reject(new Error('Please wait before sending'))
+    }
+
+    if (messageQueueRef.current === text) {
+      console.log('🔒 useDashboardChat LOCKED - duplicate in queue')
+      return Promise.reject(new Error('Message already queued'))
+    }
+
+    sendLockRef.current = true
+    lastSendTimeRef.current = now
+    messageQueueRef.current = text
+
+    try {
+      const res = await api.post('/chat/messages', {
+        threadId: activeThread,
+        messageText: text
+      })
+      
+      return res
+    } catch (err) {
+      console.error('useDashboardChat send error:', err)
+      throw err
+    } finally {
+      setTimeout(() => {
+        sendLockRef.current = false
+        messageQueueRef.current = null
+      }, 1500)
+    }
+  }
+
+  async function resolveThread(threadId) {
+    await api.patch(`/chat/threads/${threadId}/resolve`)
+    mutate(THREADS_KEY)
+    mutate(`/chat/threads/${threadId}`)
+  }
+
+  return {
+    threads, threadsLoading,
+    messages, msgsLoading,
+    activeThread, setActiveThread,
+    sendReply, resolveThread
+  }
+}
+</file>
+
+<file path="lib/queue.js">
+let chain = Promise.resolve()
+
+
+export function enqueue(fn) {
+  return new Promise((resolve, reject) => {
+    chain = chain.then(() => fn().then(resolve).catch(reject))
+  })
 }
 </file>
 
@@ -7285,80 +6665,6 @@ export function getBooksSheet(libraryLocation) {
     "typescript": "^5"
   }
 }
-</file>
-
-<file path="pages/api/books/[id].js">
-import Joi from 'joi'
-import { compose }    from '../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
-import { withAuth }   from '../../../middleware/withAuth'
-import { rateLimiter } from '../../../middleware/rateLimiter'
-import * as cache     from '../../../lib/cache'
-import { readSheet, batchUpdate, rowNum, cellRange } from '../../../lib/sheets'
-import { SHEETS, COL, ROLES } from '../../../lib/constants'
-import { getBooks, toBook }   from './index'
-
-const updateSchema = Joi.object({
-  title:         Joi.string().max(255),
-  author:        Joi.string().max(255),
-  year:          Joi.string().max(10).allow(''),   
-  category:      Joi.string().max(100),
-  description:   Joi.string().max(1000).allow(''),
-  coverImageUrl: Joi.string().uri().allow(''),
-  totalCopies:   Joi.number().integer().min(1),
-  available:     Joi.number().integer().min(0)
-}).min(1)
-
-async function handlerBook(req, res) {
-  const { id } = req.query
-  const rows   = await getBooks()
-  const book   = rows.find(r => r[COL.BOOKS.ID] === id)
-  if (!book) httpError(404, 'Book not found')
-
-  if (req.method === 'GET')
-    return res.json({ success: true, data: toBook(book) })
-
-  if (req.method === 'PATCH') {
-    if (![ROLES.ADMIN, ROLES.CLERK].includes(req.user.role))
-      httpError(403, 'Forbidden')
-
-    const { error, value } = updateSchema.validate(req.body)
-    if (error) httpError(400, error.details[0].message)
-
-    const location  = book[COL.BOOKS.LOCATION]
-    const sheetName = location === 'HIGH_SCHOOL' ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
-
-    const freshRows = await readSheet(sheetName)
-    const rn = rowNum(freshRows, COL.BOOKS.ID, id)
-    if (rn === -1) httpError(404, 'Book not found')
-
-    const updates = []
-    const map = {
-      title:         COL.BOOKS.TITLE,
-      author:        COL.BOOKS.AUTHOR,
-      year:          COL.BOOKS.YEAR,        
-      category:      COL.BOOKS.CATEGORY,
-      description:   COL.BOOKS.DESC,
-      coverImageUrl: COL.BOOKS.COVER,
-      totalCopies:   COL.BOOKS.TOTAL,
-      available:     COL.BOOKS.AVAILABLE
-    }
-    for (const [key, colIdx] of Object.entries(map)) {
-      if (value[key] !== undefined)
-        updates.push({ range: cellRange(sheetName, rn, colIdx), values: [value[key]] })
-    }
-
-    if (updates.length) await batchUpdate(updates)
-    cache.del('books')
-    cache.del(`books_${location}`)
-    return res.json({ success: true, message: 'Book updated' })
-  }
-
-  res.setHeader('Allow', ['GET', 'PATCH'])
-  res.status(405).json({ success: false, error: 'Method not allowed' })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerBook)
 </file>
 
 <file path="pages/api/books/index.js">
@@ -7481,6 +6787,1105 @@ async function handler(req, res) {
 }
 
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
+</file>
+
+<file path="pages/api/chat/messages.js">
+import Joi from 'joi'
+import { v4 as uuid }  from 'uuid'
+import { compose }     from '../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
+import { withAuth }    from '../../../middleware/withAuth'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import { trigger, ch } from '../../../lib/pusher'
+import { appendRow, readSheet } from '../../../lib/sheets'
+import { SHEETS, COL, ROLES, MSG_TYPE, THREAD_STATUS, NOTIF_TYPE, LIBRARY } from '../../../lib/constants'
+
+const schema = Joi.object({
+  threadId:    Joi.string().required(),
+  messageText: Joi.string().max(1000).required(),
+  messageType: Joi.string().valid(...Object.values(MSG_TYPE)).optional(),
+  library:     Joi.string().valid(...Object.values(LIBRARY)).optional()
+})
+
+// In-memory duplicate detection
+const recentMessages = new Map()
+const DUPLICATE_WINDOW = 5000
+
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, ts] of recentMessages.entries()) {
+    if (now - ts > DUPLICATE_WINDOW) recentMessages.delete(key)
+  }
+}, 10000)
+
+async function handler(req, res) {
+  if (req.method !== 'POST')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { error, value } = schema.validate(req.body)
+  if (error) httpError(400, error.details[0].message)
+
+  const { threadId, messageText, messageType, library } = value
+  const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
+
+  // For users: verify they own the thread (have previously sent to it)
+  // For staff: no restriction — they can reply to any thread
+  if (!isStaff) {
+    const rows = await readSheet(SHEETS.CHAT)
+    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
+    if (threadRows.length > 0) {
+      // Existing thread — must be the owner
+      const isOwner = threadRows.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+      if (!isOwner) httpError(403, 'You can only send messages in your own threads')
+    }
+    // threadRows.length === 0 means this is a brand new thread — allow it
+  }
+
+  // Duplicate detection
+  const dupKey  = `${threadId}:${req.user.id}:${messageText.trim()}`
+  const lastSent = recentMessages.get(dupKey)
+  const now      = Date.now()
+
+  if (lastSent && (now - lastSent) < DUPLICATE_WINDOW) {
+    console.log('Server blocked duplicate:', dupKey)
+    return res.status(200).json({
+      success: true,
+      message: 'Duplicate message blocked',
+      data: { id: 'DUPLICATE_BLOCKED' }
+    })
+  }
+  recentMessages.set(dupKey, now)
+
+  // Determine library location
+  let libraryLocation = library || LIBRARY.MAIN_LIBRARY
+  if (isStaff) libraryLocation = req.user.assignedLibrary || LIBRARY.MAIN_LIBRARY
+
+  const msgId       = uuid()
+  const timestamp   = new Date().toISOString()
+  const threadStatus = THREAD_STATUS.OPEN
+
+  await appendRow(SHEETS.CHAT, [
+    msgId, threadId, req.user.id, req.user.role,
+    messageType || '', messageText,
+    timestamp, 'FALSE', threadStatus, libraryLocation
+  ])
+
+  const payload = {
+    id:          msgId,
+    threadId,
+    senderId:    req.user.id,
+    senderName:  req.user.name,
+    senderRole:  req.user.role,
+    messageText,
+    timestamp,
+    libraryLocation
+  }
+
+  // Broadcast to thread channel (both user + staff subscribe to this)
+  await trigger(ch.chat(threadId), 'new-message', payload)
+
+  if (isStaff) {
+    // Find the thread owner (first user-role sender)
+    const rows = await readSheet(SHEETS.CHAT)
+    const threadRows = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
+    const ownerRow   = threadRows.find(r => r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+    const ownerId    = ownerRow?.[COL.CHAT.SENDER_ID]
+
+    if (ownerId) {
+      // Notify the user
+      await trigger(ch.userNotif(ownerId), 'chat-reply', {
+        threadId,
+        title:   'New reply from library staff',
+        message: messageText.substring(0, 80)
+      })
+      await appendRow(SHEETS.NOTIFICATIONS, [
+        uuid(), ownerId, NOTIF_TYPE.CHAT_REPLY,
+        'Library Staff Replied',
+        `Staff replied: "${messageText.substring(0, 60)}${messageText.length > 60 ? '…' : ''}"`,
+        msgId, 'FALSE', timestamp
+      ])
+    }
+  } else {
+    // User sent — notify admin/clerk inbox
+    await trigger(ch.adminInbox(libraryLocation), 'new-chat-message', {
+      threadId,
+      userId:   req.user.id,
+      userName: req.user.name,
+      preview:  messageText.substring(0, 80),
+      library:  libraryLocation
+    })
+  }
+
+  res.status(201).json({ success: true, data: payload })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
+</file>
+
+<file path="pages/api/chat/threads/[threadId]/index.js">
+import { compose }     from '../../../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../../middleware/withAuth'
+import { rateLimiter } from '../../../../../middleware/rateLimiter'
+import { readSheet, batchUpdate, cellRange } from '../../../../../lib/sheets'
+import { SHEETS, COL, ROLES } from '../../../../../lib/constants'
+
+export function toMessage(r) {
+  return {
+    id:           r[COL.CHAT.ID],
+    threadId:     r[COL.CHAT.THREAD_ID],
+    senderId:     r[COL.CHAT.SENDER_ID],
+    senderRole:   r[COL.CHAT.SENDER_ROLE],
+    messageType:  r[COL.CHAT.MSG_TYPE],
+    messageText:  r[COL.CHAT.TEXT],
+    timestamp:    r[COL.CHAT.TIMESTAMP],
+    isRead:       r[COL.CHAT.IS_READ] === 'TRUE',
+    threadStatus: r[COL.CHAT.THREAD_STATUS]
+  }
+}
+
+async function handlerThread(req, res) {
+  if (req.method !== 'GET')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { threadId } = req.query
+  const isStaff = [ROLES.ADMIN, ROLES.CLERK].includes(req.user.role)
+
+  const rows = await readSheet(SHEETS.CHAT)
+  let msgs = rows.filter(r => r[COL.CHAT.THREAD_ID] === threadId)
+  if (!msgs.length) httpError(404, 'Thread not found')
+
+  // Users: verify ownership via senderId (works for UUID threads too)
+  if (!isStaff) {
+    const isOwner = msgs.some(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+    if (!isOwner) httpError(403, 'Access denied')
+  }
+
+  // Clerks: library-based filtering
+  if (req.user.role === ROLES.CLERK) {
+    const assignedLibrary = req.user.assignedLibrary
+    if (!assignedLibrary)
+      return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
+    const threadLibrary = msgs[0]?.[COL.CHAT.LIBRARY_LOCATION]
+    if (threadLibrary && threadLibrary !== assignedLibrary)
+      return res.status(403).json({
+        success: false,
+        error: `This conversation belongs to a different library.`
+      })
+  }
+
+  // Mark messages as read (staff viewing user messages)
+  if (isStaff) {
+    const unread = msgs
+      .map((r, _) => ({ r, sheetRow: rows.indexOf(r) + 2 }))
+      .filter(({ r }) => r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+
+    if (unread.length) {
+      const updates = unread.map(({ sheetRow }) => ({
+        range:  cellRange(SHEETS.CHAT, sheetRow, COL.CHAT.IS_READ),
+        values: ['TRUE']
+      }))
+      await batchUpdate(updates)
+    }
+  }
+
+  res.json({ success: true, data: msgs.map(toMessage), total: msgs.length })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerThread)
+</file>
+
+<file path="pages/api/chat/threads/[threadId]/resolve.js">
+import { compose }     from '../../../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../../middleware/withAuth'
+import { withRole }    from '../../../../../middleware/withRole'
+import { rateLimiter } from '../../../../../middleware/rateLimiter'
+import { readSheet, updateRange, cellRange } from '../../../../../lib/sheets'
+import { SHEETS, COL, ROLES, THREAD_STATUS } from '../../../../../lib/constants'
+
+async function handlerResolve(req, res) {
+  if (req.method !== 'PATCH')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { threadId } = req.query
+  const rows = await readSheet(SHEETS.CHAT)
+
+  const threadRows = rows
+    .map((r, i) => ({ r, sheetRow: i + 2 }))
+    .filter(({ r }) => r[COL.CHAT.THREAD_ID] === threadId)
+
+  if (!threadRows.length) httpError(404, 'Thread not found')
+
+  // Update THREAD_STATUS on the last row of this thread
+  const last = threadRows[threadRows.length - 1]
+  await updateRange(
+    cellRange(SHEETS.CHAT, last.sheetRow, COL.CHAT.THREAD_STATUS),
+    [THREAD_STATUS.RESOLVED]
+  )
+
+  res.json({ success: true, message: 'Thread marked as resolved' })
+}
+
+export default compose(
+  withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
+)(handlerResolve)
+</file>
+
+<file path="pages/api/chat/threads/index.js">
+import { compose }     from '../../../../lib/compose'
+import { withErrorHandler } from '../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { withRole }    from '../../../../middleware/withRole'
+import { rateLimiter } from '../../../../middleware/rateLimiter'
+import { readSheet }   from '../../../../lib/sheets'
+import { SHEETS, COL, ROLES } from '../../../../lib/constants'
+
+async function handler(req, res) {
+  if (req.method !== 'GET')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const rows = await readSheet(SHEETS.CHAT)
+  const threadMap = new Map()
+
+  for (const r of rows) {
+    const tid        = r[COL.CHAT.THREAD_ID]
+    const msgLibrary = r[COL.CHAT.LIBRARY_LOCATION]
+
+    if (req.user.role === ROLES.CLERK) {
+      const assignedLibrary = req.user.assignedLibrary
+      if (!assignedLibrary)
+        return res.status(403).json({ success: false, error: 'No library assigned to your account.' })
+      if (msgLibrary && msgLibrary !== assignedLibrary) continue
+    }
+
+    if (!threadMap.has(tid)) threadMap.set(tid, { threadId: tid, messages: [], unread: 0 })
+    const t = threadMap.get(tid)
+    t.messages.push(r)
+    if (r[COL.CHAT.IS_READ] === 'FALSE' && r[COL.CHAT.SENDER_ROLE] === ROLES.USER) t.unread++
+  }
+
+  const threads = [...threadMap.values()].map(t => {
+    const last = t.messages[t.messages.length - 1]
+
+    // userId = first user-role sender — works for both old (threadId=userId)
+    // and new (threadId=UUID) style threads
+    const firstUserMsg = t.messages.find(m => m[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+    const userId = firstUserMsg?.[COL.CHAT.SENDER_ID] || t.threadId
+
+    return {
+      threadId:      t.threadId,
+      userId,                          // used by ThreadList for name lookup
+      lastMessage:   last[COL.CHAT.TEXT],
+      lastTimestamp: last[COL.CHAT.TIMESTAMP],
+      threadStatus:  last[COL.CHAT.THREAD_STATUS],
+      unreadCount:   t.unread,
+      messageType:   t.messages[0][COL.CHAT.MSG_TYPE],
+      library:       last[COL.CHAT.LIBRARY_LOCATION]
+    }
+  })
+
+  threads.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp))
+  res.json({ success: true, data: threads, total: threads.length })
+}
+
+export default compose(
+  withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
+)(handler)
+</file>
+
+<file path="pages/api/chat/threads/me.js">
+import { compose }     from '../../../../lib/compose'
+import { withErrorHandler } from '../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { rateLimiter } from '../../../../middleware/rateLimiter'
+import { readSheet }   from '../../../../lib/sheets'
+import { SHEETS, COL, ROLES } from '../../../../lib/constants'
+
+async function handlerMe(req, res) {
+  if (req.method !== 'GET')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const rows = await readSheet(SHEETS.CHAT)
+
+  // Find all threadIds where this user has sent at least one message
+  const myThreadIds = new Set(
+    rows
+      .filter(r => r[COL.CHAT.SENDER_ID] === req.user.id)
+      .map(r => r[COL.CHAT.THREAD_ID])
+  )
+
+  // Group all rows for those threads
+  const threadMap = new Map()
+  for (const r of rows) {
+    const tid = r[COL.CHAT.THREAD_ID]
+    if (!myThreadIds.has(tid)) continue
+    if (!threadMap.has(tid)) threadMap.set(tid, [])
+    threadMap.get(tid).push(r)
+  }
+
+  const threads = [...threadMap.entries()].map(([tid, msgs]) => {
+    const last         = msgs[msgs.length - 1]
+    const firstUserMsg = msgs.find(m => m[COL.CHAT.SENDER_ROLE] === ROLES.USER)
+    // Unread = messages NOT sent by this user that they haven't read
+    const unreadCount  = msgs.filter(m =>
+      m[COL.CHAT.IS_READ] === 'FALSE' && m[COL.CHAT.SENDER_ID] !== req.user.id
+    ).length
+
+    return {
+      threadId:      tid,
+      lastMessage:   last[COL.CHAT.TEXT],
+      lastTimestamp: last[COL.CHAT.TIMESTAMP],
+      threadStatus:  last[COL.CHAT.THREAD_STATUS],
+      messageType:   firstUserMsg?.[COL.CHAT.MSG_TYPE] || '',
+      library:       last[COL.CHAT.LIBRARY_LOCATION] || '',
+      unreadCount
+    }
+  })
+
+  threads.sort((a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp))
+  res.json({ success: true, data: threads, total: threads.length })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
+</file>
+
+<file path="pages/dashboard/borrows.jsx">
+import { useState } from 'react'
+import DashboardLayout from '../../components/layout/DashboardLayout'
+import BorrowFilters   from '../../components/borrows/BorrowFilters'
+import BorrowsTable    from '../../components/borrows/BorrowsTable'
+import OverduePanel    from '../../components/borrows/OverduePanel'
+import ApproveModal    from '../../components/borrows/ApproveModal'
+import RejectModal     from '../../components/borrows/RejectModal'
+import Modal           from '../../components/ui/Modal'
+import Spinner         from '../../components/ui/Spinner'
+import EmptyState      from '../../components/ui/EmptyState'
+import Toast           from '../../components/ui/Toast'
+import { useDashboardBorrows } from '../../hooks/useDashboardBorrows'
+import { useDashboardUsers }   from '../../hooks/useDashboardUsers'
+import { withDashboardAuth }   from '../../components/guards/withDashboardAuth'
+import useSWR from 'swr'
+import api    from '../../lib/api'
+
+export default function BorrowsPage() {
+  const { borrows, loading, approveBorrow, rejectBorrow, returnBorrow } = useDashboardBorrows()
+  const { users }  = useDashboardUsers()
+  const { data: books = [] } = useSWR('/books', url => api.get(url).then(d => d.data))
+
+  const [filters,       setFilters]  = useState({ status: 'ALL', library: 'ALL', search: '' })
+  const [approveTarget, setApprove]  = useState(null)
+  const [rejectTarget,  setReject]   = useState(null)
+  const [returnTarget,  setReturn]   = useState(null)
+  const [actionLoading, setActLoad]  = useState(false)
+  const [toast,         setToast]    = useState(null)
+  const [showOverdue,   setOverdue]  = useState(false)
+
+  function showToast(msg, type = 'success') { setToast({ message: msg, type }) }
+  function patchFilter(patch) { setFilters(prev => ({ ...prev, ...patch })) }
+
+  // Client-side filter
+  let filtered = [...borrows]
+  if (filters.status  !== 'ALL') filtered = filtered.filter(b => b.status   === filters.status)
+  if (filters.library !== 'ALL') filtered = filtered.filter(b => b.location === filters.library)
+  if (filters.search) {
+    const q = filters.search.toLowerCase()
+    filtered = filtered.filter(b =>
+      b.userId?.toLowerCase().includes(q) || b.bookId?.toLowerCase().includes(q)
+    )
+  }
+  filtered.sort((a, b) => new Date(b.requestDate) - new Date(a.requestDate))
+
+  // Count overdue for badge
+  const overdueCount = borrows.filter(b => {
+    if (b.status !== 'APPROVED' || !b.dueDate) return false
+    return Date.now() > new Date(b.dueDate).getTime()
+  }).length
+
+  async function handleSendReminder(borrowId) {
+    setActLoad(true)
+    try {
+      await api.post(`/borrows/${borrowId}/remind`)
+      showToast('Reminder sent and posted to borrower chat!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleExtend(borrowId, dueDate) {
+    setActLoad(true)
+    try {
+      await api.patch(`/borrows/${borrowId}/extend`, { dueDate })
+      showToast('Due date extended successfully!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleApprove(id, dueDate) {
+    setActLoad(true)
+    try {
+      await approveBorrow(id, dueDate)
+      setApprove(null)
+      showToast('Request approved successfully!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleReject(id, notes) {
+    setActLoad(true)
+    try {
+      await rejectBorrow(id, notes)
+      setReject(null)
+      showToast('Request rejected.')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  async function handleReturn(id) {
+    setActLoad(true)
+    try {
+      await returnBorrow(id)
+      setReturn(null)
+      showToast('Book marked as returned!')
+    } catch (e) { showToast(e.message, 'error') }
+    finally     { setActLoad(false) }
+  }
+
+  return (
+    <DashboardLayout title="Borrow Management">
+      {toast && <Toast {...toast} onClose={() => setToast(null)}/>}
+
+      {/* View toggle */}
+      <div className="flex gap-3 mb-5">
+        <button onClick={() => setOverdue(false)}
+          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${!showOverdue
+              ? 'bg-green-700 text-white'
+              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'}`}>
+          📋 All Requests
+        </button>
+        <button onClick={() => setOverdue(true)}
+          className={`relative flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
+            ${showOverdue
+              ? 'bg-red-600 text-white'
+              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'}`}>
+          ⚠️ Overdue Books
+          {overdueCount > 0 && (
+            <span className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-[10px] font-bold
+              flex items-center justify-center
+              ${showOverdue ? 'bg-white text-red-600' : 'bg-red-500 text-white'}`}>
+              {overdueCount > 9 ? '9+' : overdueCount}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {showOverdue ? (
+        loading ? <Spinner/> : (
+          <OverduePanel
+            borrows={borrows}
+            users={users}
+            books={books}
+            onSendReminder={handleSendReminder}
+            onExtend={handleExtend}
+          />
+        )
+      ) : (
+        <>
+          <BorrowFilters {...filters} onChange={patchFilter}/>
+          {loading ? <Spinner/> : filtered.length === 0
+            ? <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters."/>
+            : <BorrowsTable
+                borrows={filtered} users={users} books={books}
+                onApprove={b => setApprove(b)}
+                onReject={b  => setReject(b)}
+                onReturn={b  => setReturn(b)}
+              />
+          }
+        </>
+      )}
+
+      <ApproveModal open={!!approveTarget} borrow={approveTarget}
+        loading={actionLoading} onConfirm={handleApprove} onClose={() => setApprove(null)}/>
+
+      <RejectModal open={!!rejectTarget} borrow={rejectTarget}
+        loading={actionLoading} onConfirm={handleReject} onClose={() => setReject(null)}/>
+
+      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✔ Confirm Return">
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            Mark borrow request{' '}
+            <span className="font-mono font-semibold">{returnTarget?.id?.slice(0, 8)}…</span> as
+            returned? This will restore the book's available copy count.
+          </p>
+          <div className="flex gap-3 pt-2">
+            <button onClick={() => setReturn(null)} disabled={actionLoading}
+              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
+                py-2.5 rounded-xl hover:bg-gray-50 transition">
+              Cancel
+            </button>
+            <button onClick={() => handleReturn(returnTarget.id)} disabled={actionLoading}
+              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
+                hover:bg-blue-700 transition disabled:opacity-50">
+              {actionLoading ? 'Confirming…' : '✔ Confirm Return'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+    </DashboardLayout>
+  )
+}
+
+export const getServerSideProps = withDashboardAuth()
+</file>
+
+<file path="pages/profile.jsx">
+import { signOut, useSession } from 'next-auth/react'
+import { useState }            from 'react'
+import AppLayout               from '../components/layout/AppLayout'
+import Avatar                  from '../components/ui/Avatar'
+import StatusBadge             from '../components/ui/StatusBadge'
+import Spinner                 from '../components/ui/Spinner'
+import { useNotifications }    from '../hooks/useNotifications'
+import { useBorrows }          from '../hooks/useBorrows'
+import { fmtDate, fmtTime }   from '../lib/utils'
+
+export default function ProfilePage() {
+  const { data: session }                   = useSession()
+  const [showAllNotifs, setShowAllNotifs]   = useState(false)
+  const [signingOut, setSigningOut]         = useState(false)
+  const { notifications, markRead, loading: nLoading } = useNotifications()
+  const { borrows }                         = useBorrows()
+
+  if (!session) return null
+  const user = session.user
+
+  const stats = {
+    total:    borrows.length,
+    active:   borrows.filter(b => b.status === 'APPROVED').length,
+    returned: borrows.filter(b => b.status === 'RETURNED').length,
+    pending:  borrows.filter(b => b.status === 'PENDING').length
+  }
+
+  const visibleNotifs = showAllNotifs ? notifications : notifications.slice(0, 5)
+
+  async function handleSignOut() {
+    setSigningOut(true)
+    await signOut({ callbackUrl: '/auth/signin' })
+  }
+
+  const STAT_ITEMS = [
+    { label: 'Total',    value: stats.total,    color: 'text-green-700' },
+    { label: 'Active',   value: stats.active,   color: 'text-blue-600' },
+    { label: 'Returned', value: stats.returned, color: 'text-gray-600' },
+    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600' }
+  ]
+
+  return (
+    <AppLayout title="My Profile">
+      {/* Profile card */}
+      <div className="bg-green-700 rounded-3xl p-5 mb-5 shadow-card">
+        <div className="flex items-center gap-4">
+          <Avatar name={user.name} image={user.image} size={16}/>
+          <div className="flex-1 min-w-0">
+            <p className="text-white font-bold text-base truncate">{user.name}</p>
+            <p className="text-green-200 text-xs truncate">{user.email}</p>
+            <div className="flex gap-2 mt-2 flex-wrap">
+              <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium capitalize">
+                {user.role}
+              </span>
+              {user.dept && (
+                <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium">
+                  {user.dept}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-4 gap-2 mb-5">
+        {STAT_ITEMS.map(s => (
+          <div key={s.label} className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
+            <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
+            <p className="text-[10px] text-gray-400 mt-0.5 font-medium">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Account info */}
+      <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
+        <div className="px-4 py-3 border-b border-green-50">
+          <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Account Information</p>
+        </div>
+        {[
+          { label: 'Full Name',   value: user.name },
+          { label: 'Email',       value: user.email },
+          { label: 'Role',        value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
+          { label: 'Department',  value: user.dept || '—' },
+          { label: 'Status',      value: <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">Active</span> }
+        ].map(row => (
+          <div key={row.label} className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+            <span className="text-xs text-gray-500 font-medium">{row.label}</span>
+            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">{row.value}</span>
+          </div>
+        ))}
+      </div>
+
+
+        {user.userType === 'student' && (
+          <>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Student ID</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.studentId}</span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Year & Section</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.year} - {user.section}</span>
+            </div>
+          </>
+        )}
+
+        {user.userType === 'employee' && (
+          <>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Employee No.</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.employeeNum}</span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Position</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.position}</span>
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
+              <span className="text-xs text-gray-500 font-medium">Office</span>
+              <span className="text-xs text-gray-800 font-semibold">{user.office}</span>
+            </div>
+          </>
+        )}
+
+      {/* Notifications */}
+      <div className="mb-5">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-sm font-bold text-green-800">Notifications</p>
+          <span className="text-xs text-gray-400">{notifications.filter(n => !n.isRead).length} unread</span>
+        </div>
+        {nLoading
+          ? <Spinner className="w-6 h-6"/>
+          : notifications.length === 0
+            ? <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
+                <p className="text-2xl mb-1">🔔</p>
+                <p className="text-xs text-gray-400">No notifications yet.</p>
+              </div>
+            : <>
+                <div className="space-y-2">
+                  {visibleNotifs.map(n => (
+                    <div key={n.id} onClick={() => !n.isRead && markRead(n.id)}
+                      className={`bg-white rounded-xl border shadow-card p-3 transition cursor-pointer
+                        ${n.isRead ? 'border-green-50 opacity-70' : 'border-green-200 hover:bg-green-50'}`}>
+                      <div className="flex gap-2">
+                        {!n.isRead && <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-gray-800">{n.title}</p>
+                          <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.message}</p>
+                          <p className="text-[10px] text-gray-300 mt-1">{fmtTime(n.createdAt)}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {notifications.length > 5 && (
+                  <button onClick={() => setShowAllNotifs(!showAllNotifs)}
+                    className="mt-2 w-full text-center text-xs text-green-600 font-semibold py-2">
+                    {showAllNotifs ? '▲ Show less' : `▼ Show all ${notifications.length} notifications`}
+                  </button>
+                )}
+              </>
+        }
+      </div>
+
+      {/* Sign out */}
+      <button onClick={handleSignOut} disabled={signingOut}
+        className="w-full border-2 border-red-200 text-red-500 font-semibold py-3.5 rounded-2xl
+          hover:bg-red-50 transition disabled:opacity-50 mb-8">
+        {signingOut ? 'Signing out…' : '↩ Sign Out'}
+      </button>
+    </AppLayout>
+  )
+}
+
+export async function getServerSideProps(ctx) {
+  const { getServerSession } = await import('next-auth/next')
+  const { authOptions }      = await import('./api/auth/[...nextauth]')
+  const session = await getServerSession(ctx.req, ctx.res, authOptions)
+  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
+  return { props: {} }
+}
+</file>
+
+<file path="README.md">
+This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `pages/index.tsx`. The page auto-updates as you edit the file.
+
+[API routes](https://nextjs.org/docs/api-routes/introduction) can be accessed on [http://localhost:3000/api/hello](http://localhost:3000/api/hello). This endpoint can be edited in `pages/api/hello.ts`.
+
+The `pages/api` directory is mapped to `/api/*`. Files in this directory are treated as [API routes](https://nextjs.org/docs/api-routes/introduction) instead of React pages.
+
+This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+
+## Deploy on Render
+
+The easiest way to deploy your Next.js app is to use the [Render Platform](https://Render.com) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+</file>
+
+<file path="styles/globals.css">
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --green-dark:   #1B5E20;
+  --green-mid:    #2E7D32;
+  --green-accent: #43A047;
+  --green-light:  #C8E6C9;
+  --green-pale:   #F1F8E9;
+}
+
+html { -webkit-tap-highlight-color: transparent; }
+
+body {
+  background: var(--green-pale);
+  font-family: 'Inter', 'Segoe UI', sans-serif;
+  overscroll-behavior: none;
+}
+
+/* Smooth scrolling within chat */
+.chat-scroll { scroll-behavior: smooth; }
+
+/* PWA safe area padding */
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 16px); }
+.safe-top    { padding-top:    env(safe-area-inset-top,    0px);   }
+
+/* Status badge animations */
+.badge-pulse { animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+</file>
+
+<file path="components/borrow/BorrowCard.jsx">
+import { useState }  from 'react'
+import StatusBadge    from '../ui/StatusBadge'
+import Toast          from '../ui/Toast'
+import { fmtDate }    from '../../lib/utils'
+import api            from '../../lib/api'
+
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
+}
+
+export default function BorrowCard({ borrow, book }) {
+  const [renewing, setRenewing] = useState(false)
+  const [toast,    setToast]    = useState(null)
+
+  const isApproved  = borrow.status === 'APPROVED'
+  const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
+  const isOverdue   = daysOverdue > 0
+
+  // Determine the displayed status — show OVERDUE when applicable
+  const displayStatus = isOverdue ? 'OVERDUE' : borrow.status
+
+  async function handleRenew() {
+    setRenewing(true)
+    try {
+      await api.post(`/borrows/${borrow.id}/renew`)
+      setToast({ message: 'Renewal request sent to library staff!', type: 'success' })
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
+    } finally {
+      setRenewing(false)
+    }
+  }
+
+  return (
+    <div className={`bg-white rounded-2xl border shadow-card p-4
+      ${isOverdue ? 'border-red-200' : 'border-green-100'}`}>
+
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+
+      <div className="flex gap-3 items-start">
+        {book?.coverImageUrl
+          ? <img src={book.coverImageUrl} alt={book.title} className="w-10 h-14 object-cover rounded-lg flex-shrink-0"/>
+          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📚</div>
+        }
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-gray-800 truncate">
+            {book?.title || `Assc. No. ${borrow.bookId}`}
+          </p>
+          <p className="text-xs text-gray-500 truncate">{book?.author}</p>
+          <p className="text-xs text-green-700 mt-1">{borrow.location?.replace('_', ' ')}</p>
+        </div>
+
+        <div className="flex flex-col items-end gap-1">
+          <StatusBadge status={displayStatus}/>
+          {isOverdue && (
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
+              ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
+              {daysOverdue}d overdue
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 pt-3 border-t border-green-50 grid grid-cols-2 gap-2">
+        <div>
+          <p className="text-[10px] text-gray-400 uppercase font-medium">Requested</p>
+          <p className="text-xs text-gray-700">{fmtDate(borrow.requestDate)}</p>
+        </div>
+        {borrow.dueDate && (
+          <div>
+            <p className="text-[10px] text-gray-400 uppercase font-medium">Due Date</p>
+            <p className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-700'}`}>
+              {fmtDate(borrow.dueDate)}
+            </p>
+          </div>
+        )}
+        {borrow.notes && (
+          <div className="col-span-2">
+            <p className="text-[10px] text-gray-400 uppercase font-medium">Note</p>
+            <p className="text-xs text-gray-600">{borrow.notes}</p>
+          </div>
+        )}
+      </div>
+
+      {/* Renew button — only for approved borrows (overdue or not) */}
+      {isApproved && (
+        <button
+          onClick={handleRenew}
+          disabled={renewing}
+          className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
+            ${isOverdue
+              ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
+              : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
+          {renewing ? 'Sending request…' : '🔄 Request Renewal'}
+        </button>
+      )}
+    </div>
+  )
+}
+</file>
+
+<file path="components/layout/BottomNav.jsx">
+import Link      from 'next/link'
+import { useRouter } from 'next/router'
+
+const NAV = [
+  { href: '/dashboard', label: 'Home',    icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
+  { href: '/borrow',    label: 'Borrow',  icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
+  { href: '/borrow/status', label: 'Status', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4' },
+  { href: '/chat',      label: 'Chat',    icon: 'M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
+  { href: '/profile',   label: 'Profile', icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z' }
+]
+
+export default function BottomNav() {
+  const { pathname } = useRouter()
+  return (
+    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-green-200 shadow-nav z-30 safe-bottom">
+      <div className="flex max-w-lg mx-auto">
+        {NAV.map(({ href, label, icon }) => {
+
+          const active = pathname === href
+
+          return (
+            <Link key={href} href={href}
+              className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors
+                ${active ? 'text-green-700' : 'text-gray-400 hover:text-green-600'}`}>
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d={icon}/>
+              </svg>
+              <span className={`text-[10px] font-medium ${active ? 'text-green-800' : ''}`}>{label}</span>
+              {active && <span className="w-1 h-1 rounded-full bg-green-600 mt-0.5"/>}
+            </Link>
+          )
+        })}
+      </div>
+    </nav>
+  )
+}
+</file>
+
+<file path="lib/constants.js">
+export const ROLES = { ADMIN: 'admin', CLERK: 'clerk', USER: 'user' }
+
+export const USER_STATUS = { ACTIVE: 'active', INACTIVE: 'inactive', SUSPENDED: 'suspended' }
+
+export const USER_TYPE = { STUDENT: 'student', EMPLOYEE: 'employee' }
+
+export const BORROW_STATUS = {
+  PENDING: 'PENDING', APPROVED: 'APPROVED',
+  REJECTED: 'REJECTED', RETURNED: 'RETURNED'
+}
+
+export const LIBRARY = { HIGH_SCHOOL: 'HIGH_SCHOOL', MAIN_LIBRARY: 'MAIN_LIBRARY' }
+
+export const THREAD_STATUS = { OPEN: 'OPEN', RESOLVED: 'RESOLVED' }
+
+export const MSG_TYPE = { INQUIRY: 'INQUIRY', FEEDBACK: 'FEEDBACK', COMPLAINT: 'COMPLAINT' }
+
+export const NOTIF_TYPE = {
+  BORROW_APPROVED:  'BORROW_APPROVED',
+  BORROW_REJECTED:  'BORROW_REJECTED',
+  BORROW_DUE:       'BORROW_DUE',
+  BORROW_RENEWED:   'BORROW_RENEWED',   // NEW — renewal request notification
+  CHAT_REPLY:       'CHAT_REPLY',
+  ACCOUNT_STATUS:   'ACCOUNT_STATUS'
+}
+
+// Exact Google Sheet tab names
+export const SHEETS = {
+  USERS:         'Users',
+  BOOKS_MAIN:    'Books_MainLibrary',
+  BOOKS_HS:      'Books_HighSchool',
+  BORROWS:       'BorrowRequests',
+  CHAT:          'ChatMessages',
+  NOTIFICATIONS: 'Notifications'
+}
+
+
+export const COL = {
+  USERS: {
+    ID:0, NAME:1, EMAIL:2, ROLE:3, DEPT:4,
+    STATUS:5, GOOGLE_ID:6, CREATED:7, LAST_LOGIN:8,
+    USER_TYPE:9, STUDENT_ID:10, YEAR:11, SECTION:12,
+    EMPLOYEE_NUM:13, POSITION:14, OFFICE:15, ASSIGNED_LIBRARY:16,
+    PASSWORD:17
+  },
+  BOOKS: {
+    // Col 0 label in Sheet: "Assc. No."  |  Col 3 label in Sheet: "Year"
+    ID:0, TITLE:1, AUTHOR:2, YEAR:3, CATEGORY:4, LOCATION:5,
+    TOTAL:6, AVAILABLE:7, DESC:8, COVER:9, ADDED_AT:10, ADDED_BY:11
+  },
+  BORROWS: {
+    ID:0, USER_ID:1, BOOK_ID:2, LOCATION:3, STATUS:4,
+    REQ_DATE:5, APPROVAL_DATE:6, DUE_DATE:7, RETURN_DATE:8,
+    PROCESSED_BY:9, NOTES:10
+  },
+  CHAT: {
+    ID:0, THREAD_ID:1, SENDER_ID:2, SENDER_ROLE:3, MSG_TYPE:4,
+    TEXT:5, TIMESTAMP:6, IS_READ:7, THREAD_STATUS:8, LIBRARY_LOCATION:9
+  },
+  NOTIFS: {
+    ID:0, RECIPIENT_ID:1, TYPE:2, TITLE:3, MESSAGE:4,
+    RELATED_ID:5, IS_READ:6, CREATED:7
+  }
+}
+
+export const LETTER = (n) => String.fromCharCode(65 + n)
+
+// Helper: Get correct books sheet name based on library location
+export function getBooksSheet(libraryLocation) {
+  return libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+}
+</file>
+
+<file path="pages/api/books/[id].js">
+import Joi from 'joi'
+import { compose }    from '../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
+import { withAuth }   from '../../../middleware/withAuth'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import * as cache     from '../../../lib/cache'
+import { readSheet, batchUpdate, rowNum, cellRange } from '../../../lib/sheets'
+import { SHEETS, COL, ROLES } from '../../../lib/constants'
+import { getBooks, toBook }   from './index'
+
+const updateSchema = Joi.object({
+  title:         Joi.string().max(255),
+  author:        Joi.string().max(255),
+  year:          Joi.string().max(10).allow(''),   
+  category:      Joi.string().max(100),
+  description:   Joi.string().max(1000).allow(''),
+  coverImageUrl: Joi.string().uri().allow(''),
+  totalCopies:   Joi.number().integer().min(1),
+  available:     Joi.number().integer().min(0)
+}).min(1)
+
+async function handlerBook(req, res) {
+  const { id } = req.query
+  const rows   = await getBooks()
+  const book   = rows.find(r => r[COL.BOOKS.ID] === id)
+  if (!book) httpError(404, 'Book not found')
+
+  if (req.method === 'GET')
+    return res.json({ success: true, data: toBook(book) })
+
+  if (req.method === 'PATCH') {
+    if (![ROLES.ADMIN, ROLES.CLERK].includes(req.user.role))
+      httpError(403, 'Forbidden')
+
+    const { error, value } = updateSchema.validate(req.body)
+    if (error) httpError(400, error.details[0].message)
+
+    const location  = book[COL.BOOKS.LOCATION]
+    const sheetName = location === 'HIGH_SCHOOL' ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
+
+    const freshRows = await readSheet(sheetName)
+    const rn = rowNum(freshRows, COL.BOOKS.ID, id)
+    if (rn === -1) httpError(404, 'Book not found')
+
+    const updates = []
+    const map = {
+      title:         COL.BOOKS.TITLE,
+      author:        COL.BOOKS.AUTHOR,
+      year:          COL.BOOKS.YEAR,        
+      category:      COL.BOOKS.CATEGORY,
+      description:   COL.BOOKS.DESC,
+      coverImageUrl: COL.BOOKS.COVER,
+      totalCopies:   COL.BOOKS.TOTAL,
+      available:     COL.BOOKS.AVAILABLE
+    }
+    for (const [key, colIdx] of Object.entries(map)) {
+      if (value[key] !== undefined)
+        updates.push({ range: cellRange(sheetName, rn, colIdx), values: [value[key]] })
+    }
+
+    if (updates.length) await batchUpdate(updates)
+    cache.del('books')
+    cache.del(`books_${location}`)
+    return res.json({ success: true, message: 'Book updated' })
+  }
+
+  res.setHeader('Allow', ['GET', 'PATCH'])
+  res.status(405).json({ success: false, error: 'Method not allowed' })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerBook)
 </file>
 
 <file path="pages/api/borrows/[id]/remind.js">
@@ -7980,411 +8385,6 @@ export async function getServerSideProps(ctx) {
   if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
   return { props: {} }
 }
-</file>
-
-<file path="pages/dashboard/borrows.jsx">
-import { useState } from 'react'
-import DashboardLayout from '../../components/layout/DashboardLayout'
-import BorrowFilters   from '../../components/borrows/BorrowFilters'
-import BorrowsTable    from '../../components/borrows/BorrowsTable'
-import OverduePanel    from '../../components/borrows/OverduePanel'
-import ApproveModal    from '../../components/borrows/ApproveModal'
-import RejectModal     from '../../components/borrows/RejectModal'
-import Modal           from '../../components/ui/Modal'
-import Spinner         from '../../components/ui/Spinner'
-import EmptyState      from '../../components/ui/EmptyState'
-import Toast           from '../../components/ui/Toast'
-import { useDashboardBorrows } from '../../hooks/useDashboardBorrows'
-import { useDashboardUsers }   from '../../hooks/useDashboardUsers'
-import { withDashboardAuth }   from '../../components/guards/withDashboardAuth'
-import useSWR from 'swr'
-import api    from '../../lib/api'
-
-export default function BorrowsPage() {
-  const { borrows, loading, approveBorrow, rejectBorrow, returnBorrow } = useDashboardBorrows()
-  const { users }  = useDashboardUsers()
-  const { data: books = [] } = useSWR('/books', url => api.get(url).then(d => d.data))
-
-  const [filters,       setFilters]  = useState({ status: 'ALL', library: 'ALL', search: '' })
-  const [approveTarget, setApprove]  = useState(null)
-  const [rejectTarget,  setReject]   = useState(null)
-  const [returnTarget,  setReturn]   = useState(null)
-  const [actionLoading, setActLoad]  = useState(false)
-  const [toast,         setToast]    = useState(null)
-  const [showOverdue,   setOverdue]  = useState(false)
-
-  function showToast(msg, type = 'success') { setToast({ message: msg, type }) }
-  function patchFilter(patch) { setFilters(prev => ({ ...prev, ...patch })) }
-
-  // Client-side filter
-  let filtered = [...borrows]
-  if (filters.status  !== 'ALL') filtered = filtered.filter(b => b.status   === filters.status)
-  if (filters.library !== 'ALL') filtered = filtered.filter(b => b.location === filters.library)
-  if (filters.search) {
-    const q = filters.search.toLowerCase()
-    filtered = filtered.filter(b =>
-      b.userId?.toLowerCase().includes(q) || b.bookId?.toLowerCase().includes(q)
-    )
-  }
-  filtered.sort((a, b) => new Date(b.requestDate) - new Date(a.requestDate))
-
-  // Count overdue for badge
-  const overdueCount = borrows.filter(b => {
-    if (b.status !== 'APPROVED' || !b.dueDate) return false
-    return Date.now() > new Date(b.dueDate).getTime()
-  }).length
-
-  async function handleSendReminder(borrowId) {
-    setActLoad(true)
-    try {
-      await api.post(`/borrows/${borrowId}/remind`)
-      showToast('Reminder sent and posted to borrower chat!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleExtend(borrowId, dueDate) {
-    setActLoad(true)
-    try {
-      await api.patch(`/borrows/${borrowId}/extend`, { dueDate })
-      showToast('Due date extended successfully!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleApprove(id, dueDate) {
-    setActLoad(true)
-    try {
-      await approveBorrow(id, dueDate)
-      setApprove(null)
-      showToast('Request approved successfully!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleReject(id, notes) {
-    setActLoad(true)
-    try {
-      await rejectBorrow(id, notes)
-      setReject(null)
-      showToast('Request rejected.')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  async function handleReturn(id) {
-    setActLoad(true)
-    try {
-      await returnBorrow(id)
-      setReturn(null)
-      showToast('Book marked as returned!')
-    } catch (e) { showToast(e.message, 'error') }
-    finally     { setActLoad(false) }
-  }
-
-  return (
-    <DashboardLayout title="Borrow Management">
-      {toast && <Toast {...toast} onClose={() => setToast(null)}/>}
-
-      {/* View toggle */}
-      <div className="flex gap-3 mb-5">
-        <button onClick={() => setOverdue(false)}
-          className={`flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
-            ${!showOverdue
-              ? 'bg-green-700 text-white'
-              : 'bg-white border border-green-200 text-gray-600 hover:border-green-300'}`}>
-          📋 All Requests
-        </button>
-        <button onClick={() => setOverdue(true)}
-          className={`relative flex-1 py-2 px-4 rounded-xl font-semibold text-sm transition
-            ${showOverdue
-              ? 'bg-red-600 text-white'
-              : 'bg-white border border-red-200 text-gray-600 hover:border-red-300'}`}>
-          ⚠️ Overdue Books
-          {overdueCount > 0 && (
-            <span className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-[10px] font-bold
-              flex items-center justify-center
-              ${showOverdue ? 'bg-white text-red-600' : 'bg-red-500 text-white'}`}>
-              {overdueCount > 9 ? '9+' : overdueCount}
-            </span>
-          )}
-        </button>
-      </div>
-
-      {showOverdue ? (
-        loading ? <Spinner/> : (
-          <OverduePanel
-            borrows={borrows}
-            users={users}
-            books={books}
-            onSendReminder={handleSendReminder}
-            onExtend={handleExtend}
-          />
-        )
-      ) : (
-        <>
-          <BorrowFilters {...filters} onChange={patchFilter}/>
-          {loading ? <Spinner/> : filtered.length === 0
-            ? <EmptyState icon="📋" title="No borrow requests found" subtitle="Try adjusting your filters."/>
-            : <BorrowsTable
-                borrows={filtered} users={users} books={books}
-                onApprove={b => setApprove(b)}
-                onReject={b  => setReject(b)}
-                onReturn={b  => setReturn(b)}
-              />
-          }
-        </>
-      )}
-
-      <ApproveModal open={!!approveTarget} borrow={approveTarget}
-        loading={actionLoading} onConfirm={handleApprove} onClose={() => setApprove(null)}/>
-
-      <RejectModal open={!!rejectTarget} borrow={rejectTarget}
-        loading={actionLoading} onConfirm={handleReject} onClose={() => setReject(null)}/>
-
-      <Modal open={!!returnTarget} onClose={() => setReturn(null)} title="✔ Confirm Return">
-        <div className="space-y-4">
-          <p className="text-sm text-gray-600">
-            Mark borrow request{' '}
-            <span className="font-mono font-semibold">{returnTarget?.id?.slice(0, 8)}…</span> as
-            returned? This will restore the book's available copy count.
-          </p>
-          <div className="flex gap-3 pt-2">
-            <button onClick={() => setReturn(null)} disabled={actionLoading}
-              className="flex-1 border-2 border-gray-200 text-gray-600 font-semibold
-                py-2.5 rounded-xl hover:bg-gray-50 transition">
-              Cancel
-            </button>
-            <button onClick={() => handleReturn(returnTarget.id)} disabled={actionLoading}
-              className="flex-1 bg-blue-600 text-white font-semibold py-2.5 rounded-xl
-                hover:bg-blue-700 transition disabled:opacity-50">
-              {actionLoading ? 'Confirming…' : '✔ Confirm Return'}
-            </button>
-          </div>
-        </div>
-      </Modal>
-    </DashboardLayout>
-  )
-}
-
-export const getServerSideProps = withDashboardAuth()
-</file>
-
-<file path="pages/profile.jsx">
-import { signOut, useSession } from 'next-auth/react'
-import { useState }            from 'react'
-import AppLayout               from '../components/layout/AppLayout'
-import Avatar                  from '../components/ui/Avatar'
-import StatusBadge             from '../components/ui/StatusBadge'
-import Spinner                 from '../components/ui/Spinner'
-import { useNotifications }    from '../hooks/useNotifications'
-import { useBorrows }          from '../hooks/useBorrows'
-import { fmtDate, fmtTime }   from '../lib/utils'
-
-export default function ProfilePage() {
-  const { data: session }                   = useSession()
-  const [showAllNotifs, setShowAllNotifs]   = useState(false)
-  const [signingOut, setSigningOut]         = useState(false)
-  const { notifications, markRead, loading: nLoading } = useNotifications()
-  const { borrows }                         = useBorrows()
-
-  if (!session) return null
-  const user = session.user
-
-  const stats = {
-    total:    borrows.length,
-    active:   borrows.filter(b => b.status === 'APPROVED').length,
-    returned: borrows.filter(b => b.status === 'RETURNED').length,
-    pending:  borrows.filter(b => b.status === 'PENDING').length
-  }
-
-  const visibleNotifs = showAllNotifs ? notifications : notifications.slice(0, 5)
-
-  async function handleSignOut() {
-    setSigningOut(true)
-    await signOut({ callbackUrl: '/auth/signin' })
-  }
-
-  const STAT_ITEMS = [
-    { label: 'Total',    value: stats.total,    color: 'text-green-700' },
-    { label: 'Active',   value: stats.active,   color: 'text-blue-600' },
-    { label: 'Returned', value: stats.returned, color: 'text-gray-600' },
-    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600' }
-  ]
-
-  return (
-    <AppLayout title="My Profile">
-      {/* Profile card */}
-      <div className="bg-green-700 rounded-3xl p-5 mb-5 shadow-card">
-        <div className="flex items-center gap-4">
-          <Avatar name={user.name} image={user.image} size={16}/>
-          <div className="flex-1 min-w-0">
-            <p className="text-white font-bold text-base truncate">{user.name}</p>
-            <p className="text-green-200 text-xs truncate">{user.email}</p>
-            <div className="flex gap-2 mt-2 flex-wrap">
-              <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium capitalize">
-                {user.role}
-              </span>
-              {user.dept && (
-                <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium">
-                  {user.dept}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-4 gap-2 mb-5">
-        {STAT_ITEMS.map(s => (
-          <div key={s.label} className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
-            <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
-            <p className="text-[10px] text-gray-400 mt-0.5 font-medium">{s.label}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Account info */}
-      <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
-        <div className="px-4 py-3 border-b border-green-50">
-          <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Account Information</p>
-        </div>
-        {[
-          { label: 'Full Name',   value: user.name },
-          { label: 'Email',       value: user.email },
-          { label: 'Role',        value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
-          { label: 'Department',  value: user.dept || '—' },
-          { label: 'Status',      value: <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">Active</span> }
-        ].map(row => (
-          <div key={row.label} className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
-            <span className="text-xs text-gray-500 font-medium">{row.label}</span>
-            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">{row.value}</span>
-          </div>
-        ))}
-      </div>
-
-
-        {user.userType === 'student' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Student ID</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.studentId}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Year & Section</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.year} - {user.section}</span>
-            </div>
-          </>
-        )}
-
-        {user.userType === 'employee' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Employee No.</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.employeeNum}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Position</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.position}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Office</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.office}</span>
-            </div>
-          </>
-        )}
-
-      {/* Notifications */}
-      <div className="mb-5">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-sm font-bold text-green-800">Notifications</p>
-          <span className="text-xs text-gray-400">{notifications.filter(n => !n.isRead).length} unread</span>
-        </div>
-        {nLoading
-          ? <Spinner className="w-6 h-6"/>
-          : notifications.length === 0
-            ? <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
-                <p className="text-2xl mb-1">🔔</p>
-                <p className="text-xs text-gray-400">No notifications yet.</p>
-              </div>
-            : <>
-                <div className="space-y-2">
-                  {visibleNotifs.map(n => (
-                    <div key={n.id} onClick={() => !n.isRead && markRead(n.id)}
-                      className={`bg-white rounded-xl border shadow-card p-3 transition cursor-pointer
-                        ${n.isRead ? 'border-green-50 opacity-70' : 'border-green-200 hover:bg-green-50'}`}>
-                      <div className="flex gap-2">
-                        {!n.isRead && <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-gray-800">{n.title}</p>
-                          <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.message}</p>
-                          <p className="text-[10px] text-gray-300 mt-1">{fmtTime(n.createdAt)}</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {notifications.length > 5 && (
-                  <button onClick={() => setShowAllNotifs(!showAllNotifs)}
-                    className="mt-2 w-full text-center text-xs text-green-600 font-semibold py-2">
-                    {showAllNotifs ? '▲ Show less' : `▼ Show all ${notifications.length} notifications`}
-                  </button>
-                )}
-              </>
-        }
-      </div>
-
-      {/* Sign out */}
-      <button onClick={handleSignOut} disabled={signingOut}
-        className="w-full border-2 border-red-200 text-red-500 font-semibold py-3.5 rounded-2xl
-          hover:bg-red-50 transition disabled:opacity-50 mb-8">
-        {signingOut ? 'Signing out…' : '↩ Sign Out'}
-      </button>
-    </AppLayout>
-  )
-}
-
-export async function getServerSideProps(ctx) {
-  const { getServerSession } = await import('next-auth/next')
-  const { authOptions }      = await import('./api/auth/[...nextauth]')
-  const session = await getServerSession(ctx.req, ctx.res, authOptions)
-  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
-  return { props: {} }
-}
-</file>
-
-<file path="styles/globals.css">
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-:root {
-  --green-dark:   #1B5E20;
-  --green-mid:    #2E7D32;
-  --green-accent: #43A047;
-  --green-light:  #C8E6C9;
-  --green-pale:   #F1F8E9;
-}
-
-html { -webkit-tap-highlight-color: transparent; }
-
-body {
-  background: var(--green-pale);
-  font-family: 'Inter', 'Segoe UI', sans-serif;
-  overscroll-behavior: none;
-}
-
-/* Smooth scrolling within chat */
-.chat-scroll { scroll-behavior: smooth; }
-
-/* PWA safe area padding */
-.safe-bottom { padding-bottom: env(safe-area-inset-bottom, 16px); }
-.safe-top    { padding-top:    env(safe-area-inset-top,    0px);   }
-
-/* Status badge animations */
-.badge-pulse { animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
 </file>
 
 </files>

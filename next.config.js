@@ -7,5 +7,12 @@ const withPWA = require('next-pwa')({
 
 module.exports = withPWA({
   reactStrictMode: true,
-  images: { domains: ['drive.google.com', 'lh3.googleusercontent.com'] }
+  images: {
+    domains: [
+      'drive.google.com',
+      'lh3.googleusercontent.com',
+      // Google Drive thumbnail endpoint (used by toCoverUrl helper)
+      'www.googleapis.com'
+    ]
+  }
 })
