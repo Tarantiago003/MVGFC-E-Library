@@ -1,15 +1,16 @@
-import Link        from 'next/link'
-import { useRouter } from 'next/router'
+import Link          from 'next/link'
+import { useRouter }  from 'next/router'
 import { useSession } from 'next-auth/react'
 
 const NAV_ALL = [
-  { href: '/dashboard/home',    icon: '🏠', label: 'Overview'       },
-  { href: '/dashboard/borrows', icon: '📚', label: 'Borrow Requests' },
-  { href: '/dashboard/chat',    icon: '💬', label: 'Chat Console'    },
-  { href: '/dashboard/notices', icon: '📄', label: 'Generate Notices' }, // NEW
+  { href: '/dashboard/home',    icon: '🏠', label: 'Overview'         },
+  { href: '/dashboard/borrows', icon: '📚', label: 'Borrow Requests'  },
+  { href: '/dashboard/chat',    icon: '💬', label: 'Chat Console'     },
+  { href: '/dashboard/notices', icon: '📄', label: 'Generate Notices' },
 ]
 const NAV_ADMIN = [
-  { href: '/dashboard/users',   icon: '👥', label: 'User Management' },
+  { href: '/dashboard/users',     icon: '👥', label: 'User Management' },
+  { href: '/dashboard/analytics', icon: '📊', label: 'Analytics'       },
 ]
 
 export default function Sidebar() {

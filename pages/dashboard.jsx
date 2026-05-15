@@ -1,23 +1,56 @@
-
 import { useSession }       from 'next-auth/react'
-import Link                 from 'next/link'
-import AppLayout            from '../components/layout/AppLayout'
-import StatusBadge          from '../components/ui/StatusBadge'
-import Avatar               from '../components/ui/Avatar'
-import Spinner              from '../components/ui/Spinner'
-import { useBorrows }       from '../hooks/useBorrows'
-import { useNotifications } from '../hooks/useNotifications'
-import { fmtDate }          from '../lib/utils'
+import Link                  from 'next/link'
+import AppLayout             from '../components/layout/AppLayout'
+import StatusBadge           from '../components/ui/StatusBadge'
+import Avatar                from '../components/ui/Avatar'
+import Spinner               from '../components/ui/Spinner'
+import { useBorrows }        from '../hooks/useBorrows'
+import { useNotifications }  from '../hooks/useNotifications'
+import { fmtDate }           from '../lib/utils'
+import api                   from '../lib/api'
+
+const E_RESOURCES = [
+  {
+    key:   'open-access',
+    href:  'https://www.mvgallegolibrary.com/open-access',
+    icon:  '🌐',
+    label: 'Open Access Databases',
+    sub:   'Free scholarly resources',
+    color: 'bg-blue-700'
+  },
+  {
+    key:   'e-journals',
+    href:  'https://www.mvgallegolibrary.com/e-journal-institutes',
+    icon:  '📰',
+    label: 'E-Journal Institutes',
+    sub:   'Academic journal access',
+    color: 'bg-indigo-700'
+  }
+]
+
+const QUICK = [
+  { href: '/borrow',        icon: '📖', label: 'Borrow a Book',  color: 'bg-green-700' },
+  { href: '/borrow/status', icon: '📋', label: 'My Requests',    color: 'bg-green-600' },
+  { href: '/chat',          icon: '💬', label: 'Chat Support',   color: 'bg-green-800' },
+  { href: '/profile',       icon: '👤', label: 'My Profile',     color: 'bg-green-500' }
+]
+
+async function trackAndOpen(resource) {
+  // Fire-and-forget: don't block the navigation
+  api.post('/analytics/track', {
+    eventType:    'RESOURCE_CLICK',
+    resourceName: resource.label,
+    resourceUrl:  resource.href
+  }).catch(() => {})
+  window.open(resource.href, '_blank', 'noopener,noreferrer')
+}
 
 export default function Dashboard() {
   const { data: session, status } = useSession()
   const { borrows, loading } = useBorrows()
   const { notifications, unread, markRead } = useNotifications()
 
-  // Wait for session to load
   if (status === 'loading') return null
-
-  // Redirect if not logged in
   if (!session) {
     if (typeof window !== 'undefined') window.location.href = '/auth/signin'
     return null
@@ -26,13 +59,6 @@ export default function Dashboard() {
   const user    = session.user
   const recent  = borrows.slice(0, 3)
   const unreadN = notifications.filter(n => !n.isRead).slice(0, 3)
-
-  const QUICK = [
-    { href: '/borrow',        icon: '📖', label: 'Borrow a Book',  color: 'bg-green-700' },
-    { href: '/borrow/status', icon: '📋', label: 'My Requests',    color: 'bg-green-600' },
-    { href: '/chat',          icon: '💬', label: 'Chat Support',   color: 'bg-green-800' },
-    { href: '/profile',       icon: '👤', label: 'My Profile',     color: 'bg-green-500' }
-  ]
 
   return (
     <AppLayout title="MVGFC E-Library">
@@ -55,6 +81,25 @@ export default function Dashboard() {
             <span className="text-2xl">{q.icon}</span>
             <span className="text-white font-semibold text-sm">{q.label}</span>
           </Link>
+        ))}
+      </div>
+
+      {/* ── E-Resources ── */}
+      <h2 className="text-green-800 font-semibold text-sm mb-3">📚 E-Journals &amp; Open Access Databases</h2>
+      <div className="grid grid-cols-1 gap-3 mb-6">
+        {E_RESOURCES.map(r => (
+          <button key={r.key} onClick={() => trackAndOpen(r)}
+            className={`${r.color} rounded-2xl p-4 flex items-center gap-4 shadow-card hover:opacity-90 transition w-full text-left`}>
+            <span className="text-3xl">{r.icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-white font-bold text-sm">{r.label}</p>
+              <p className="text-white/70 text-xs mt-0.5">{r.sub}</p>
+            </div>
+            <svg className="w-5 h-5 text-white/70 flex-shrink-0" fill="none" stroke="currentColor"
+              strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+            </svg>
+          </button>
         ))}
       </div>
 

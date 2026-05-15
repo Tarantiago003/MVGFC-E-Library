@@ -86,6 +86,7 @@ lib/api.js
 lib/cache.js
 lib/compose.js
 lib/constants.js
+lib/coverImage.js
 lib/pusher-client.js
 lib/pusher.js
 lib/queue.js
@@ -101,6 +102,8 @@ next.config.mjs
 package.json
 pages/_app.jsx
 pages/_document.jsx
+pages/api/analytics/index.js
+pages/api/analytics/track.js
 pages/api/auth/[...nextauth].js
 pages/api/auth/register.js
 pages/api/books/[id].js
@@ -129,6 +132,7 @@ pages/borrow/status.jsx
 pages/chat.jsx
 pages/dashboard.jsx
 pages/dashboard/403.jsx
+pages/dashboard/analytics.jsx
 pages/dashboard/borrows.jsx
 pages/dashboard/chat.jsx
 pages/dashboard/home.jsx
@@ -155,30 +159,358 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
-<file path="components/borrow/BookCard.jsx">
-export default function BookCard({ book, selected, onClick }) {
-  const avail = book.available > 0
+<file path="pages/api/analytics/index.js">
+import { compose }     from '../../../lib/compose'
+import { withErrorHandler } from '../../../middleware/errorHandler'
+import { withAuth }    from '../../../middleware/withAuth'
+import { withRole }    from '../../../middleware/withRole'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import { batchRead }   from '../../../lib/sheets'
+import { SHEETS, COL, ROLES } from '../../../lib/constants'
+
+function toEvent(r) {
+  return {
+    id:           r[COL.ANALYTICS.ID],
+    userId:       r[COL.ANALYTICS.USER_ID],
+    eventType:    r[COL.ANALYTICS.EVENT_TYPE],
+    resourceName: r[COL.ANALYTICS.RESOURCE_NAME],
+    resourceUrl:  r[COL.ANALYTICS.RESOURCE_URL],
+    timestamp:    r[COL.ANALYTICS.TIMESTAMP]
+  }
+}
+
+async function handler(req, res) {
+  if (req.method !== 'GET')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const [events, users] = await batchRead([SHEETS.ANALYTICS, SHEETS.USERS])
+
+  // Build user lookup for names
+  const userMap = {}
+  for (const u of users) {
+    userMap[u[COL.USERS.ID]] = {
+      name:      u[COL.USERS.NAME],
+      email:     u[COL.USERS.EMAIL],
+      institute: u[COL.USERS.INSTITUTE] || '—',
+      userType:  u[COL.USERS.USER_TYPE]
+    }
+  }
+
+  const mapped = events.map(r => ({
+    ...toEvent(r),
+    userName:      userMap[r[COL.ANALYTICS.USER_ID]]?.name      || '—',
+    userEmail:     userMap[r[COL.ANALYTICS.USER_ID]]?.email     || '—',
+    userInstitute: userMap[r[COL.ANALYTICS.USER_ID]]?.institute || '—',
+    userType:      userMap[r[COL.ANALYTICS.USER_ID]]?.userType  || '—'
+  }))
+
+  // Sort newest first
+  mapped.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+
+  // Aggregate stats per resource
+  const resourceStats = {}
+  const uniquePerResource = {}
+  for (const e of mapped) {
+    const key = e.resourceName
+    if (!resourceStats[key]) {
+      resourceStats[key] = { name: key, url: e.resourceUrl, clicks: 0, uniqueUsers: new Set() }
+    }
+    resourceStats[key].clicks++
+    resourceStats[key].uniqueUsers.add(e.userId)
+    if (!uniquePerResource[key]) uniquePerResource[key] = new Set()
+    uniquePerResource[key].add(e.userId)
+  }
+
+  const resources = Object.values(resourceStats).map(r => ({
+    name:         r.name,
+    url:          r.url,
+    clicks:       r.clicks,
+    uniqueVisitors: r.uniqueUsers.size
+  }))
+
+  // Daily breakdown (last 30 days)
+  const dailyMap = {}
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+  for (const e of mapped) {
+    if (new Date(e.timestamp).getTime() < cutoff) continue
+    const day = e.timestamp.split('T')[0]
+    dailyMap[day] = (dailyMap[day] || 0) + 1
+  }
+  const daily = Object.entries(dailyMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, count]) => ({ date, count }))
+
+  // Institute breakdown
+  const instituteMap = {}
+  for (const e of mapped) {
+    const inst = e.userInstitute || '—'
+    instituteMap[inst] = (instituteMap[inst] || 0) + 1
+  }
+  const byInstitute = Object.entries(instituteMap)
+    .sort(([, a], [, b]) => b - a)
+    .map(([institute, clicks]) => ({ institute, clicks }))
+
+  const uniqueTotal = new Set(mapped.map(e => e.userId)).size
+
+  res.json({
+    success: true,
+    data: {
+      totalClicks:    mapped.length,
+      uniqueVisitors: uniqueTotal,
+      resources,
+      byInstitute,
+      daily,
+      recent: mapped.slice(0, 50)   // last 50 events with user info
+    }
+  })
+}
+
+export default compose(
+  withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
+)(handler)
+</file>
+
+<file path="pages/api/analytics/track.js">
+import Joi from 'joi'
+import { v4 as uuid }  from 'uuid'
+import { compose }     from '../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
+import { withAuth }    from '../../../middleware/withAuth'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import { appendRow }   from '../../../lib/sheets'
+import { SHEETS, COL, EVENT_TYPE } from '../../../lib/constants'
+
+const schema = Joi.object({
+  eventType:    Joi.string().valid(...Object.values(EVENT_TYPE)).required(),
+  resourceName: Joi.string().max(200).required(),
+  resourceUrl:  Joi.string().uri().max(500).required()
+})
+
+async function handler(req, res) {
+  if (req.method !== 'POST')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { error, value } = schema.validate(req.body)
+  if (error) httpError(400, error.details[0].message)
+
+  const id        = uuid()
+  const timestamp = new Date().toISOString()
+
+  await appendRow(SHEETS.ANALYTICS, [
+    id,
+    req.user.id,
+    value.eventType,
+    value.resourceName,
+    value.resourceUrl,
+    timestamp
+  ])
+
+  res.status(201).json({ success: true, data: { id } })
+}
+
+export default compose(withErrorHandler, rateLimiter(200), withAuth)(handler)
+</file>
+
+<file path="pages/dashboard/analytics.jsx">
+import useSWR            from 'swr'
+import DashboardLayout   from '../../components/layout/DashboardLayout'
+import Spinner           from '../../components/ui/Spinner'
+import EmptyState        from '../../components/ui/EmptyState'
+import { withDashboardAuth } from '../../components/guards/withDashboardAuth'
+import api               from '../../lib/api'
+
+const fetcher = url => api.get(url).then(d => d.data)
+
+function fmtDate(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+function fmtTime(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function BarRow({ label, value, max, color = 'bg-green-600' }) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0
   return (
-    <button onClick={avail ? onClick : undefined}
-      className={`w-full text-left p-3 rounded-xl border-2 transition-all flex gap-3 items-start
-        ${selected ? 'border-green-600 bg-green-50' : avail ? 'border-gray-200 bg-white hover:border-green-300' : 'border-gray-100 bg-gray-50 opacity-60 cursor-not-allowed'}`}>
-      {book.coverImageUrl
-        ? <img src={book.coverImageUrl} alt={book.title} className="w-12 h-16 object-cover rounded-lg flex-shrink-0"/>
-        : <div className="w-12 h-16 bg-green-100 rounded-lg flex items-center justify-center flex-shrink-0 text-xl">📘</div>
-      }
-      <div className="flex-1 min-w-0">
-        <p className="font-semibold text-sm text-gray-800 truncate">{book.title}</p>
-        <p className="text-xs text-gray-500 mt-0.5 truncate">{book.author}</p>
-        <p className="text-xs text-green-700 mt-1 font-medium">{book.category}</p>
-        <span className={`mt-1 inline-block text-xs px-2 py-0.5 rounded-full font-semibold
-          ${avail ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
-          {avail ? `${book.available} available` : 'Unavailable'}
-        </span>
+    <div className="mb-3">
+      <div className="flex justify-between text-xs mb-1">
+        <span className="font-medium text-gray-700 truncate max-w-[70%]">{label}</span>
+        <span className="font-bold text-gray-800">{value}</span>
       </div>
-      {selected && <span className="text-green-600 text-lg flex-shrink-0">✓</span>}
-    </button>
+      <div className="w-full bg-gray-100 rounded-full h-2">
+        <div className={`h-2 rounded-full transition-all ${color}`} style={{ width: `${pct}%` }}/>
+      </div>
+    </div>
   )
 }
+
+function MiniSparkline({ daily }) {
+  if (!daily?.length) return null
+  const max = Math.max(...daily.map(d => d.count), 1)
+  return (
+    <div className="flex items-end gap-0.5 h-10">
+      {daily.slice(-14).map(d => (
+        <div key={d.date} className="flex-1 bg-green-500 rounded-sm opacity-80"
+          style={{ height: `${Math.max(4, (d.count / max) * 40)}px` }}
+          title={`${d.date}: ${d.count} click${d.count !== 1 ? 's' : ''}`}/>
+      ))}
+    </div>
+  )
+}
+
+export default function AnalyticsPage() {
+  const { data, isLoading } = useSWR('/analytics', fetcher, { refreshInterval: 30_000 })
+
+  if (isLoading) return (
+    <DashboardLayout title="📊 Traffic Analytics"><Spinner/></DashboardLayout>
+  )
+
+  if (!data) return (
+    <DashboardLayout title="📊 Traffic Analytics">
+      <EmptyState icon="📊" title="No analytics data yet" subtitle="Link clicks will appear here once users start visiting resources."/>
+    </DashboardLayout>
+  )
+
+  const { totalClicks, uniqueVisitors, resources = [], byInstitute = [], daily = [], recent = [] } = data
+  const maxClicks = Math.max(...resources.map(r => r.clicks), 1)
+  const maxInst   = Math.max(...byInstitute.map(i => i.clicks), 1)
+
+  const RESOURCE_COLORS = ['bg-blue-600', 'bg-indigo-600', 'bg-purple-600', 'bg-teal-600']
+
+  return (
+    <DashboardLayout title="📊 Traffic Analytics">
+
+      {/* Summary strip */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Clicks',     value: totalClicks,    icon: '🖱️',  color: 'text-green-700  bg-green-50  border-green-200'  },
+          { label: 'Unique Visitors',  value: uniqueVisitors, icon: '👤',  color: 'text-blue-700   bg-blue-50   border-blue-200'   },
+          { label: 'Resources Tracked',value: resources.length,icon: '🔗', color: 'text-purple-700 bg-purple-50 border-purple-200' },
+          { label: 'Days Recorded',    value: daily.length,   icon: '📅',  color: 'text-yellow-700 bg-yellow-50 border-yellow-200' },
+        ].map(s => (
+          <div key={s.label} className={`border rounded-2xl p-5 ${s.color} shadow-sm`}>
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide opacity-70">{s.label}</p>
+                <p className="text-3xl font-bold mt-1">{s.value}</p>
+              </div>
+              <span className="text-3xl opacity-80">{s.icon}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+
+        {/* Resource breakdown */}
+        <div className="lg:col-span-2 bg-white rounded-2xl border border-green-100 shadow-sm p-5">
+          <h3 className="font-bold text-green-800 mb-4">🔗 Clicks by Resource</h3>
+          {resources.length === 0
+            ? <p className="text-sm text-gray-400 text-center py-8">No resource clicks yet.</p>
+            : resources.map((r, i) => (
+                <div key={r.name} className="mb-4 last:mb-0">
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-gray-800 truncate">{r.name}</p>
+                      <a href={r.url} target="_blank" rel="noopener noreferrer"
+                        className="text-[10px] text-blue-500 hover:underline truncate block max-w-[280px]">
+                        {r.url}
+                      </a>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-lg font-bold text-gray-800">{r.clicks}</p>
+                      <p className="text-[10px] text-gray-400">{r.uniqueVisitors} unique</p>
+                    </div>
+                  </div>
+                  <div className="w-full bg-gray-100 rounded-full h-2.5">
+                    <div className={`h-2.5 rounded-full ${RESOURCE_COLORS[i % RESOURCE_COLORS.length]}`}
+                      style={{ width: `${Math.round((r.clicks / maxClicks) * 100)}%` }}/>
+                  </div>
+                </div>
+              ))
+          }
+        </div>
+
+        {/* Institute breakdown */}
+        <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-5">
+          <h3 className="font-bold text-green-800 mb-4">🏛️ Clicks by Institute</h3>
+          {byInstitute.length === 0
+            ? <p className="text-sm text-gray-400 text-center py-8">No data yet.</p>
+            : byInstitute.map(({ institute, clicks }) => (
+                <BarRow key={institute} label={institute} value={clicks} max={maxInst}
+                  color="bg-indigo-500"/>
+              ))
+          }
+        </div>
+      </div>
+
+      {/* Daily sparkline */}
+      {daily.length > 0 && (
+        <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-5 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-bold text-green-800">📈 Daily Activity (last 14 days)</h3>
+            <span className="text-xs text-gray-400">Each bar = 1 day</span>
+          </div>
+          <MiniSparkline daily={daily}/>
+          <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+            <span>{daily.slice(-14)[0]?.date}</span>
+            <span>Today</span>
+          </div>
+        </div>
+      )}
+
+      {/* Recent activity log */}
+      <div className="bg-white rounded-2xl border border-green-100 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-green-50 flex items-center justify-between">
+          <h3 className="font-bold text-green-800">🕐 Recent Activity</h3>
+          <span className="text-xs text-gray-400">{recent.length} latest events</span>
+        </div>
+        {recent.length === 0
+          ? <div className="py-10 text-center text-gray-400 text-sm">No activity yet.</div>
+          : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-green-50 border-b border-green-100">
+                    {['User', 'Institute', 'Resource', 'Time'].map(h => (
+                      <th key={h} className="text-left px-4 py-2.5 text-xs font-bold text-green-700 uppercase tracking-wide">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-green-50">
+                  {recent.map(e => (
+                    <tr key={e.id} className="hover:bg-green-50/40 transition">
+                      <td className="px-4 py-3">
+                        <p className="font-medium text-sm text-gray-800">{e.userName}</p>
+                        <p className="text-xs text-gray-400">{e.userEmail}</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-semibold">
+                          {e.userInstitute}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="text-xs font-medium text-gray-700">{e.resourceName}</p>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                        {fmtTime(e.timestamp)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        }
+      </div>
+    </DashboardLayout>
+  )
+}
+
+export const getServerSideProps = withDashboardAuth()
 </file>
 
 <file path="components/borrow/LibraryCard.jsx">
@@ -837,18 +1169,19 @@ export default function DashboardTopBar({ title }) {
 </file>
 
 <file path="components/layout/Sidebar.jsx">
-import Link        from 'next/link'
-import { useRouter } from 'next/router'
+import Link          from 'next/link'
+import { useRouter }  from 'next/router'
 import { useSession } from 'next-auth/react'
 
 const NAV_ALL = [
-  { href: '/dashboard/home',    icon: '🏠', label: 'Overview'       },
-  { href: '/dashboard/borrows', icon: '📚', label: 'Borrow Requests' },
-  { href: '/dashboard/chat',    icon: '💬', label: 'Chat Console'    },
-  { href: '/dashboard/notices', icon: '📄', label: 'Generate Notices' }, // NEW
+  { href: '/dashboard/home',    icon: '🏠', label: 'Overview'         },
+  { href: '/dashboard/borrows', icon: '📚', label: 'Borrow Requests'  },
+  { href: '/dashboard/chat',    icon: '💬', label: 'Chat Console'     },
+  { href: '/dashboard/notices', icon: '📄', label: 'Generate Notices' },
 ]
 const NAV_ADMIN = [
-  { href: '/dashboard/users',   icon: '👥', label: 'User Management' },
+  { href: '/dashboard/users',     icon: '👥', label: 'User Management' },
+  { href: '/dashboard/analytics', icon: '📊', label: 'Analytics'       },
 ]
 
 export default function Sidebar() {
@@ -1479,6 +1812,60 @@ export function compose(...fns) {
 }
 </file>
 
+<file path="lib/coverImage.js">
+/**
+ * Converts any Google Drive share/view URL into a direct-embed URL.
+ * Also passes through regular https:// URLs unchanged.
+ *
+ * Supported input formats:
+ *   https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+ *   https://drive.google.com/open?id=FILE_ID
+ *   https://drive.google.com/uc?id=FILE_ID
+ *   https://lh3.googleusercontent.com/...   (already works, pass through)
+ *   Any other https:// URL                  (pass through)
+ *
+ * Output: https://drive.google.com/thumbnail?id=FILE_ID&sz=w400
+ *   - thumbnail endpoint works without login for publicly shared files
+ *   - sz=w400 gives a 400px-wide version (fast, small)
+ *   - Change sz=w800 for higher quality if needed
+ */
+export function toCoverUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null
+  const url = raw.trim()
+  if (!url) return null
+
+  // Already a direct thumbnail/export URL — return as-is
+  if (url.includes('drive.google.com/thumbnail') ||
+      url.includes('drive.google.com/uc?') ||
+      url.startsWith('https://lh3.googleusercontent.com')) {
+    return url
+  }
+
+  // Format: /file/d/FILE_ID/...
+  const fileMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/)
+  if (fileMatch) {
+    return `https://drive.google.com/thumbnail?id=${fileMatch[1]}&sz=w400`
+  }
+
+  // Format: ?id=FILE_ID or open?id=FILE_ID
+  const idMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/)
+  if (idMatch) {
+    return `https://drive.google.com/thumbnail?id=${idMatch[1]}&sz=w400`
+  }
+
+  // Not a Drive URL — return as-is (regular https image)
+  return url
+}
+
+/**
+ * Returns true if the string looks like a valid image URL we should try to show.
+ */
+export function isValidCoverUrl(raw) {
+  const url = toCoverUrl(raw)
+  return !!url && (url.startsWith('https://') || url.startsWith('http://'))
+}
+</file>
+
 <file path="lib/pusher-client.js">
 import PusherJs from 'pusher-js'
 
@@ -1779,20 +2166,6 @@ export function withValidation(schema) {
 }
 </file>
 
-<file path="next.config.js">
-const withPWA = require('next-pwa')({
-  dest: 'public',
-  disable: process.env.NODE_ENV === 'development',
-  register: true,
-  skipWaiting: true
-})
-
-module.exports = withPWA({
-  reactStrictMode: true,
-  images: { domains: ['drive.google.com', 'lh3.googleusercontent.com'] }
-})
-</file>
-
 <file path="next.config.mjs">
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -2005,130 +2378,96 @@ import { v4 as uuid } from 'uuid'
 import bcrypt from 'bcryptjs'
 import { readSheet, appendRow } from '../../../lib/sheets'
 import * as cache from '../../../lib/cache'
-import { SHEETS, COL, ROLES, USER_STATUS, USER_TYPE } from '../../../lib/constants'
+import { SHEETS, COL, ROLES, USER_STATUS, USER_TYPE, INSTITUTES } from '../../../lib/constants'
+
+const commonFields = {
+  name:      Joi.string().max(255).required(),
+  email:     Joi.string().email().required(),
+  password:  Joi.string().min(6).required(),
+  institute: Joi.string().valid(...INSTITUTES).required()
+}
 
 const studentSchema = Joi.object({
-  name:       Joi.string().max(255).required(),
-  email:      Joi.string().email().required(),
-  password:   Joi.string().min(6).required(),
-  userType:   Joi.string().valid(USER_TYPE.STUDENT).required(),
-  studentId:  Joi.string().max(50).required(),
-  year:       Joi.string().max(20).required(),
-  section:    Joi.string().max(50).required()
+  ...commonFields,
+  userType:  Joi.string().valid(USER_TYPE.STUDENT).required(),
+  studentId: Joi.string().max(50).required(),
+  year:      Joi.string().max(20).required(),
+  section:   Joi.string().max(50).required()
 })
 
 const employeeSchema = Joi.object({
-  name:          Joi.string().max(255).required(),
-  email:         Joi.string().email().required(),  
-  password:      Joi.string().min(6).required(),
-  userType:      Joi.string().valid(USER_TYPE.EMPLOYEE).required(),
-  employeeNum:   Joi.string().max(50).required(),
-  position:      Joi.string().max(100).required(),
-  office:        Joi.string().max(100).required()
+  ...commonFields,
+  userType:    Joi.string().valid(USER_TYPE.EMPLOYEE).required(),
+  employeeNum: Joi.string().max(50).required(),
+  position:    Joi.string().max(100).required(),
+  office:      Joi.string().max(100).required()
 })
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
+  if (req.method !== 'POST')
     return res.status(405).json({ success: false, error: 'Method not allowed' })
-  }
 
   try {
     const { userType } = req.body
-    
-    // Validate based on user type
     const schema = userType === USER_TYPE.STUDENT ? studentSchema : employeeSchema
     const { error, value } = schema.validate(req.body)
-    
-    if (error) {
+
+    if (error)
       return res.status(400).json({
         success: false,
         error: 'Validation failed',
         details: error.details.map(d => d.message)
       })
-    }
 
-    // Check if ID already exists
     const users = await readSheet(SHEETS.USERS)
 
-    // Check for duplicate email
-    const existingEmail = users.find(r => r[COL.USERS.EMAIL] === value.email)
-    if (existingEmail) {
-      return res.status(409).json({
-        success: false,
-        error: 'Email already registered'
-      })
-    }
-    
-    let existing = null
+    // Duplicate email check
+    if (users.find(r => r[COL.USERS.EMAIL] === value.email))
+      return res.status(409).json({ success: false, error: 'Email already registered' })
+
+    // Duplicate ID check
     if (userType === USER_TYPE.STUDENT) {
-      existing = users.find(r => r[COL.USERS.STUDENT_ID] === value.studentId)
-      if (existing) {
-        return res.status(409).json({
-          success: false,
-          error: 'Student ID already registered'
-        })
-      }
+      if (users.find(r => r[COL.USERS.STUDENT_ID] === value.studentId))
+        return res.status(409).json({ success: false, error: 'Student ID already registered' })
     } else {
-      existing = users.find(r => r[COL.USERS.EMPLOYEE_NUM] === value.employeeNum)
-      if (existing) {
-        return res.status(409).json({
-          success: false,
-          error: 'Employee number already registered'
-        })
-      }
+      if (users.find(r => r[COL.USERS.EMPLOYEE_NUM] === value.employeeNum))
+        return res.status(409).json({ success: false, error: 'Employee number already registered' })
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(value.password, 10)
-
-    // Create new user row
-    const now = new Date().toISOString()
+    const now    = new Date().toISOString()
     const userId = uuid()
-    
-    // Generate email based on type (optional - for notifications)
-    let email = ''
-    if (userType === USER_TYPE.STUDENT) {
-      email = `${value.studentId}@student.mvgfc.edu.ph`
-    } else {
-      email = `${value.employeeNum}@mvgfc.edu.ph`
-    }
-    
-      const newRow = [
-        userId,                    // A: UserID
-        value.name,                // B: FullName
-        value.email,               // C: Email (from form)
-        ROLES.USER,                // D: Role
-        '',                        // E: Department
-        USER_STATUS.ACTIVE,        // F: Status
-        '',                        // G: GoogleID
-        now,                       // H: CreatedAt
-        now,                       // I: LastLoginAt
-        value.userType,            // J: UserType
-        value.studentId   || '',   // K: StudentID
-        value.year        || '',   // L: Year
-        value.section     || '',   // M: Section
-        value.employeeNum || '',   // N: EmployeeNumber
-        value.position    || '',   // O: Position
-        value.office      || '',   // P: Office
-        '',                        // Q: AssignedLibrary
-        hashedPassword             // R: Password
-      ]
 
+    // Columns must match COL.USERS exactly (0–18)
+    const newRow = [
+      userId,                    // 0  UserID
+      value.name,                // 1  FullName
+      value.email,               // 2  Email
+      ROLES.USER,                // 3  Role
+      '',                        // 4  Department
+      USER_STATUS.ACTIVE,        // 5  Status
+      '',                        // 6  GoogleID
+      now,                       // 7  CreatedAt
+      now,                       // 8  LastLoginAt
+      value.userType,            // 9  UserType
+      value.studentId   || '',   // 10 StudentID
+      value.year        || '',   // 11 Year
+      value.section     || '',   // 12 Section
+      value.employeeNum || '',   // 13 EmployeeNumber
+      value.position    || '',   // 14 Position
+      value.office      || '',   // 15 Office
+      '',                        // 16 AssignedLibrary
+      hashedPassword,            // 17 Password
+      value.institute   || '',   // 18 Institute  ← NEW column S
+    ]
 
     await appendRow(SHEETS.USERS, newRow)
     cache.del('users')
 
-    return res.status(201).json({
-      success: true,
-      message: 'Registration successful'
-    })
-
+    return res.status(201).json({ success: true, message: 'Registration successful' })
   } catch (err) {
     console.error('[Registration error]', err)
-    return res.status(500).json({
-      success: false,
-      error: 'Registration failed'
-    })
+    return res.status(500).json({ success: false, error: 'Registration failed' })
   }
 }
 </file>
@@ -2213,86 +2552,6 @@ export default compose(
   withAuth,
   withRole(ROLES.ADMIN, ROLES.CLERK)
 )(handlerExtend)
-</file>
-
-<file path="pages/api/borrows/[id]/renew.js">
-import { v4 as uuid } from 'uuid'
-import { compose }     from '../../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
-import { withAuth }    from '../../../../middleware/withAuth'
-import { rateLimiter } from '../../../../middleware/rateLimiter'
-import { trigger, ch } from '../../../../lib/pusher'
-import { readSheet, appendRow } from '../../../../lib/sheets'
-import {
-  SHEETS, COL, ROLES, NOTIF_TYPE, BORROW_STATUS, THREAD_STATUS
-} from '../../../../lib/constants'
-
-async function handlerRenew(req, res) {
-  if (req.method !== 'POST')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  if (req.user.role !== ROLES.USER)
-    httpError(403, 'Only borrowers can request renewals')
-
-  const { id } = req.query
-  const borrows = await readSheet(SHEETS.BORROWS)
-  const borrow  = borrows.find(r => r[COL.BORROWS.ID] === id)
-
-  if (!borrow) httpError(404, 'Borrow request not found')
-  if (borrow[COL.BORROWS.USER_ID] !== req.user.id) httpError(403, 'Access denied')
-  if (borrow[COL.BORROWS.STATUS]  !== BORROW_STATUS.APPROVED)
-    httpError(400, 'Can only request renewal for approved borrows')
-
-  const location  = borrow[COL.BORROWS.LOCATION]
-  const bookId    = borrow[COL.BORROWS.BOOK_ID]
-  const dueDate   = borrow[COL.BORROWS.DUE_DATE]
-  const timestamp = new Date().toISOString()
-
-  const formattedDue = dueDate
-    ? new Date(dueDate).toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })
-    : 'N/A'
-
-  // Message posted to the user's own chat thread so staff can see & respond
-  const chatText = `📖 Renewal Request — Hi! I would like to request a renewal for Assc. No. ${bookId}. Current due date: ${formattedDue}. Please let me know if it can be extended. Thank you!`
-
-  const chatId = uuid()
-  await appendRow(SHEETS.CHAT, [
-    chatId,
-    req.user.id,        // threadId = userId
-    req.user.id,        // senderId
-    ROLES.USER,         // senderRole
-    'INQUIRY',          // messageType
-    chatText,
-    timestamp,
-    'FALSE',
-    THREAD_STATUS.OPEN,
-    location
-  ])
-
-  // Real-time: update user's own chat page
-  await trigger(ch.chat(req.user.id), 'new-message', {
-    id:          chatId,
-    threadId:    req.user.id,
-    senderId:    req.user.id,
-    senderName:  req.user.name,
-    senderRole:  ROLES.USER,
-    messageText: chatText,
-    timestamp,
-    libraryLocation: location
-  })
-
-  // Real-time: notify admin inbox (thread list refresh)
-  await trigger(ch.adminInbox(location), 'new-chat-message', {
-    threadId: req.user.id,
-    userName: req.user.name,
-    preview:  chatText.substring(0, 80),
-    library:  location
-  })
-
-  res.json({ success: true, message: 'Renewal request sent to library staff.' })
-}
-
-export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerRenew)
 </file>
 
 <file path="pages/api/borrows/[id]/status.js">
@@ -2831,92 +3090,71 @@ export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
 import { useState } from 'react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
+import { INSTITUTES } from '../../lib/constants'
 
 export default function RegisterPage() {
   const router = useRouter()
-  
   const [userType, setUserType] = useState('student')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState('')
+
   const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    password: '',
-    confirmPassword: '',
-    // Student fields
-    studentId: '',
-    year: '',
-    section: '',
-    // Employee fields
-    employeeNum: '',
-    position: '',
-    office: ''
+    name: '', email: '', password: '', confirmPassword: '',
+    institute: '',
+    // Student
+    studentId: '', year: '', section: '',
+    // Employee
+    employeeNum: '', position: '', office: ''
   })
 
-  const handleChange = (e) => {
+  const handleChange = e =>
     setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }))
-  }
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async e => {
     e.preventDefault()
     setError('')
 
-    // Validate passwords match
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match')
-      return
-    }
-
-    // Validate password strength
-    if (formData.password.length < 6) {
-      setError('Password must be at least 6 characters')
-      return
-    }
+    if (formData.password !== formData.confirmPassword) { setError('Passwords do not match'); return }
+    if (formData.password.length < 6) { setError('Password must be at least 6 characters'); return }
+    if (!formData.institute) { setError('Please select your institute'); return }
 
     setLoading(true)
-
     try {
       const payload = {
-        name: formData.name,
-        email: formData.email,
-        password: formData.password,
+        name:      formData.name,
+        email:     formData.email,
+        password:  formData.password,
+        institute: formData.institute,
         userType,
-        ...(userType === 'student' ? {
-          studentId: formData.studentId,
-          year: formData.year,
-          section: formData.section
-        } : {
-          employeeNum: formData.employeeNum,
-          position: formData.position,
-          office: formData.office
-        })
+        ...(userType === 'student'
+          ? { studentId: formData.studentId, year: formData.year, section: formData.section }
+          : { employeeNum: formData.employeeNum, position: formData.position, office: formData.office })
       }
 
-      const response = await fetch('/api/auth/register', {
+      const res  = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       })
+      const data = await res.json()
 
-      const data = await response.json()
-      
       if (data.success) {
         alert('Registration successful! Please sign in.')
         router.push('/auth/signin')
       } else {
         setError(data.error || 'Registration failed')
       }
-    } catch (err) {
+    } catch {
       setError('Registration failed. Please try again.')
     } finally {
       setLoading(false)
     }
   }
 
+  const inputCls = 'w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-green-500'
+
   return (
     <div className="min-h-screen bg-green-800 flex flex-col items-center justify-center px-6 py-12">
-      {/* Logo */}
       <div className="flex flex-col items-center mb-8">
         <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center shadow-xl mb-4">
           <span className="text-4xl">📚</span>
@@ -2925,7 +3163,6 @@ export default function RegisterPage() {
         <p className="text-green-200 text-sm mt-1">MVGFC E-Library System</p>
       </div>
 
-      {/* Registration Form */}
       <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-8 max-h-[85vh] overflow-y-auto">
         <h2 className="text-green-800 text-xl font-bold mb-1">Welcome!</h2>
         <p className="text-gray-500 text-sm mb-6">Create your library account</p>
@@ -2937,91 +3174,65 @@ export default function RegisterPage() {
         )}
 
         <div className="space-y-4">
-          {/* User Type Selection */}
+          {/* User type */}
           <div>
             <label className="block text-sm font-semibold text-green-800 mb-2">
               I am a <span className="text-red-500">*</span>
             </label>
             <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => setUserType('student')}
-                className={`py-3 px-4 rounded-xl border-2 font-semibold text-sm transition ${
-                  userType === 'student'
-                    ? 'border-green-600 bg-green-50 text-green-800'
-                    : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'
-                }`}
-              >
-                🎓 Student
-              </button>
-              <button
-                type="button"
-                onClick={() => setUserType('employee')}
-                className={`py-3 px-4 rounded-xl border-2 font-semibold text-sm transition ${
-                  userType === 'employee'
-                    ? 'border-green-600 bg-green-50 text-green-800'
-                    : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'
-                }`}
-              >
-                💼 Employee
-              </button>
+              {[['student','🎓 Student'],['employee','💼 Employee']].map(([val,lbl]) => (
+                <button key={val} type="button" onClick={() => setUserType(val)}
+                  className={`py-3 px-4 rounded-xl border-2 font-semibold text-sm transition
+                    ${userType === val ? 'border-green-600 bg-green-50 text-green-800' : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'}`}>
+                  {lbl}
+                </button>
+              ))}
             </div>
           </div>
 
-          {/* Common Fields */}
-              <div>
-                <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                  Full Name <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  name="name"
-                  value={formData.name}
-                  onChange={handleChange}
-                  required
-                  className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Juan Dela Cruz"
-                />
-              </div>
+          {/* Full name */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Full Name <span className="text-red-500">*</span>
+            </label>
+            <input type="text" name="name" value={formData.name} onChange={handleChange}
+              required className={inputCls} placeholder="Juan Dela Cruz"/>
+          </div>
 
-              {/* ADD EMAIL FIELD */}
-              <div>
-                <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                  Email Address <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="email"
-                  name="email"
-                  value={formData.email}
-                  onChange={handleChange}
-                  required
-                  className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder={userType === 'student' ? 'student@mvgfc.edu.ph' : 'employee@mvgfc.edu.ph'}
-                />
-                <p className="text-xs text-gray-400 mt-1">
-                  Use your official school email for notifications
-                </p>
-              </div>
+          {/* Email */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Email Address <span className="text-red-500">*</span>
+            </label>
+            <input type="email" name="email" value={formData.email} onChange={handleChange}
+              required className={inputCls}
+              placeholder={userType === 'student' ? 'student@mvgfc.edu.ph' : 'employee@mvgfc.edu.ph'}/>
+            <p className="text-xs text-gray-400 mt-1">Use your official school email for notifications</p>
+          </div>
 
-          {/* Student-Specific Fields */}
+          {/* ── INSTITUTE (shared for both types) ── */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Institute <span className="text-red-500">*</span>
+            </label>
+            <select name="institute" value={formData.institute} onChange={handleChange}
+              required className={inputCls}>
+              <option value="">Select institute…</option>
+              {INSTITUTES.map(i => (
+                <option key={i} value={i}>{i}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Student-specific */}
           {userType === 'student' && (
             <>
               <div>
                 <label className="block text-sm font-semibold text-green-800 mb-1.5">
                   Student ID Number <span className="text-red-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  name="studentId"
-                  value={formData.studentId}
-                  onChange={handleChange}
-                  required
-                  className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="2024-12345"
-                />
+                <input type="text" name="studentId" value={formData.studentId} onChange={handleChange}
+                  required className={inputCls} placeholder="2024-12345"/>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -3029,140 +3240,72 @@ export default function RegisterPage() {
                   <label className="block text-sm font-semibold text-green-800 mb-1.5">
                     Year Level <span className="text-red-500">*</span>
                   </label>
-                  <select
-                    name="year"
-                    value={formData.year}
-                    onChange={handleChange}
-                    required
-                    className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                      focus:outline-none focus:ring-2 focus:ring-green-500"
-                  >
-                    <option value="">Select...</option>
-                    <option value="Grade 7">Grade 7</option>
-                    <option value="Grade 8">Grade 8</option>
-                    <option value="Grade 9">Grade 9</option>
-                    <option value="Grade 10">Grade 10</option>
-                    <option value="Grade 11">Grade 11</option>
-                    <option value="Grade 12">Grade 12</option>
-                    <option value="1st Year">1st Year</option>
-                    <option value="2nd Year">2nd Year</option>
-                    <option value="3rd Year">3rd Year</option>
-                    <option value="4th Year">4th Year</option>
+                  <select name="year" value={formData.year} onChange={handleChange}
+                    required className={inputCls}>
+                    <option value="">Select…</option>
+                    {['Grade 7','Grade 8','Grade 9','Grade 10','Grade 11','Grade 12',
+                      '1st Year','2nd Year','3rd Year','4th Year'].map(y => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
                   </select>
                 </div>
-
                 <div>
                   <label className="block text-sm font-semibold text-green-800 mb-1.5">
                     Section <span className="text-red-500">*</span>
                   </label>
-                  <input
-                    type="text"
-                    name="section"
-                    value={formData.section}
-                    onChange={handleChange}
-                    required
-                    className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                      focus:outline-none focus:ring-2 focus:ring-green-500"
-                    placeholder="A, B, C..."
-                  />
+                  <input type="text" name="section" value={formData.section} onChange={handleChange}
+                    required className={inputCls} placeholder="A, B, C…"/>
                 </div>
               </div>
             </>
           )}
 
-          {/* Employee-Specific Fields */}
+          {/* Employee-specific */}
           {userType === 'employee' && (
             <>
               <div>
                 <label className="block text-sm font-semibold text-green-800 mb-1.5">
                   Employee Number <span className="text-red-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  name="employeeNum"
-                  value={formData.employeeNum}
-                  onChange={handleChange}
-                  required
-                  className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="EMP-12345"
-                />
+                <input type="text" name="employeeNum" value={formData.employeeNum} onChange={handleChange}
+                  required className={inputCls} placeholder="EMP-12345"/>
               </div>
-
               <div>
                 <label className="block text-sm font-semibold text-green-800 mb-1.5">
                   Position <span className="text-red-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  name="position"
-                  value={formData.position}
-                  onChange={handleChange}
-                  required
-                  className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Faculty, Staff, Administrator..."
-                />
+                <input type="text" name="position" value={formData.position} onChange={handleChange}
+                  required className={inputCls} placeholder="Faculty, Staff, Administrator…"/>
               </div>
-
               <div>
                 <label className="block text-sm font-semibold text-green-800 mb-1.5">
                   Office/Department <span className="text-red-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  name="office"
-                  value={formData.office}
-                  onChange={handleChange}
-                  required
-                  className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                    focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Registrar, IT, Library..."
-                />
+                <input type="text" name="office" value={formData.office} onChange={handleChange}
+                  required className={inputCls} placeholder="Registrar, IT, Library…"/>
               </div>
             </>
           )}
 
-          {/* Password Fields */}
+          {/* Password */}
           <div>
             <label className="block text-sm font-semibold text-green-800 mb-1.5">
               Password <span className="text-red-500">*</span>
             </label>
-            <input
-              type="password"
-              name="password"
-              value={formData.password}
-              onChange={handleChange}
-              required
-              className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                focus:outline-none focus:ring-2 focus:ring-green-500"
-              placeholder="At least 6 characters"
-            />
+            <input type="password" name="password" value={formData.password} onChange={handleChange}
+              required className={inputCls} placeholder="At least 6 characters"/>
           </div>
-
           <div>
             <label className="block text-sm font-semibold text-green-800 mb-1.5">
               Confirm Password <span className="text-red-500">*</span>
             </label>
-            <input
-              type="password"
-              name="confirmPassword"
-              value={formData.confirmPassword}
-              onChange={handleChange}
-              required
-              className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                focus:outline-none focus:ring-2 focus:ring-green-500"
-              placeholder="Re-enter password"
-            />
+            <input type="password" name="confirmPassword" value={formData.confirmPassword}
+              onChange={handleChange} required className={inputCls} placeholder="Re-enter password"/>
           </div>
 
-          <button
-            onClick={handleSubmit}
-            disabled={loading}
-            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold
-              py-3 px-4 rounded-2xl transition-all disabled:opacity-60 mt-2"
-          >
-            {loading ? 'Creating Account...' : '✓ Create Account'}
+          <button onClick={handleSubmit} disabled={loading}
+            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold py-3 px-4 rounded-2xl transition-all disabled:opacity-60 mt-2">
+            {loading ? 'Creating Account…' : '✓ Create Account'}
           </button>
         </div>
 
@@ -3344,337 +3487,60 @@ export default function SignIn() {
 }
 </file>
 
-<file path="pages/borrow/index.jsx">
-import { useState }      from 'react'
-import { useRouter }     from 'next/router'
-import AppLayout         from '../../components/layout/AppLayout'
-import StepIndicator     from '../../components/borrow/StepIndicator'
-import LibraryCard       from '../../components/borrow/LibraryCard'
-import BookCard          from '../../components/borrow/BookCard'
-import Spinner           from '../../components/ui/Spinner'
-import EmptyState        from '../../components/ui/EmptyState'
-import Toast             from '../../components/ui/Toast'
-import { useBooks }      from '../../hooks/useBooks'
-import { useBorrows }    from '../../hooks/useBorrows'
+<file path="pages/dashboard.jsx">
+import { useSession }       from 'next-auth/react'
+import Link                  from 'next/link'
+import AppLayout             from '../components/layout/AppLayout'
+import StatusBadge           from '../components/ui/StatusBadge'
+import Avatar                from '../components/ui/Avatar'
+import Spinner               from '../components/ui/Spinner'
+import { useBorrows }        from '../hooks/useBorrows'
+import { useNotifications }  from '../hooks/useNotifications'
+import { fmtDate }           from '../lib/utils'
+import api                   from '../lib/api'
 
-const LIBRARIES = [
+const E_RESOURCES = [
   {
-    id: 'HIGH_SCHOOL',
-    name: 'High School Department',
-    description: 'Library for HS students and faculty.',
-    icon: '🏫'
+    key:   'open-access',
+    href:  'https://www.mvgallegolibrary.com/open-access',
+    icon:  '🌐',
+    label: 'Open Access Databases',
+    sub:   'Free scholarly resources',
+    color: 'bg-blue-700'
   },
   {
-    id: 'MAIN_LIBRARY',
-    name: 'Main Library',
-    description: 'Central academic library for all college departments.',
-    icon: '🏛️'
+    key:   'e-journals',
+    href:  'https://www.mvgallegolibrary.com/e-journal-institutes',
+    icon:  '📰',
+    label: 'E-Journal Institutes',
+    sub:   'Academic journal access',
+    color: 'bg-indigo-700'
   }
 ]
 
-export default function BorrowPage() {
-  const router = useRouter()
-  const [step,     setStep]     = useState(0)
-  const [library,  setLibrary]  = useState(null)
-  const [book,     setBook]     = useState(null)
-  const [search,   setSearch]   = useState('')
-  const [toast,    setToast]    = useState(null)
-  const [submitting, setSub]    = useState(false)
+const QUICK = [
+  { href: '/borrow',        icon: '📖', label: 'Borrow a Book',  color: 'bg-green-700' },
+  { href: '/borrow/status', icon: '📋', label: 'My Requests',    color: 'bg-green-600' },
+  { href: '/chat',          icon: '💬', label: 'Chat Support',   color: 'bg-green-800' },
+  { href: '/profile',       icon: '👤', label: 'My Profile',     color: 'bg-green-500' }
+]
 
-  const { books, loading: bLoading } = useBooks({ location: library, search })
-  const { submitBorrow }             = useBorrows()
-
-  function showToast(message, type = 'success') {
-    setToast({ message, type })
-  }
-
-  async function handleSubmit() {
-    if (!book || !library) return
-    setSub(true)
-    try {
-      await submitBorrow(book.id, library)
-      showToast('Borrow request submitted! Awaiting approval.')
-      setTimeout(() => router.push('/borrow/status'), 1800)
-    } catch (err) {
-      showToast(err.message || 'Failed to submit request.', 'error')
-    } finally {
-      setSub(false)
-    }
-  }
-
-  return (
-    <AppLayout title="Borrow a Book" back={step > 0}>
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
-
-      <StepIndicator current={step}/>
-
-      {/* ── STEP 0: Select Library ─── */}
-      {step === 0 && (
-        <div>
-          <h2 className="text-green-800 font-bold text-lg mb-1">Select Library</h2>
-          <p className="text-gray-500 text-sm mb-5">Choose the library location you want to borrow from.</p>
-          <div className="space-y-3">
-            {LIBRARIES.map(lib => (
-              <LibraryCard key={lib.id} {...lib}
-                selected={library === lib.id}
-                onClick={() => setLibrary(lib.id)}
-              />
-            ))}
-          </div>
-          <button onClick={() => setStep(1)} disabled={!library}
-            className="mt-6 w-full bg-green-700 disabled:opacity-40 text-white font-semibold
-              py-3.5 rounded-2xl transition hover:bg-green-800">
-            Next: Browse Books →
-          </button>
-        </div>
-      )}
-
-      {/* ── STEP 1: Select Book ─── */}
-      {step === 1 && (
-        <div>
-          <h2 className="text-green-800 font-bold text-lg mb-1">Select a Book</h2>
-          <p className="text-gray-500 text-sm mb-4">
-            {library === 'HIGH_SCHOOL' ? '🏫 High School Department' : '🏛️ Main Library'}
-          </p>
-
-          {/* Search bar */}
-          <div className="relative mb-4">
-            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
-              fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round"
-                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-            </svg>
-            <input value={search} onChange={e => { setSearch(e.target.value); setBook(null) }}
-              placeholder="Search title or author…"
-              className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-green-200 bg-white
-                text-sm focus:outline-none focus:ring-2 focus:ring-green-500"/>
-          </div>
-
-          {bLoading
-            ? <Spinner/>
-            : books.length === 0
-              ? <EmptyState icon="🔍" title="No books found"
-                  subtitle={search ? `No results for "${search}"` : 'No books at this location.'}/>
-              : <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
-                  {books.map(b => (
-                    <BookCard key={b.id} book={b}
-                      selected={book?.id === b.id}
-                      onClick={() => setBook(b)}/>
-                  ))}
-                </div>
-          }
-
-          <div className="flex gap-3 mt-5">
-            <button onClick={() => setStep(0)}
-              className="flex-1 border-2 border-green-200 text-green-700 font-semibold
-                py-3 rounded-2xl hover:bg-green-50 transition">
-              ← Back
-            </button>
-            <button onClick={() => setStep(2)} disabled={!book}
-              className="flex-1 bg-green-700 disabled:opacity-40 text-white font-semibold
-                py-3 rounded-2xl hover:bg-green-800 transition">
-              Next: Confirm →
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ── STEP 2: Confirm ─── */}
-      {step === 2 && book && (
-        <div>
-          <h2 className="text-green-800 font-bold text-lg mb-1">Confirm Request</h2>
-          <p className="text-gray-500 text-sm mb-5">Review your borrow request before submitting.</p>
-
-          {/* Book summary card */}
-          <div className="bg-white rounded-2xl border border-green-100 shadow-card p-5 mb-5">
-            <div className="flex gap-4">
-              {book.coverImageUrl
-                ? <img src={book.coverImageUrl} alt={book.title} className="w-16 h-22 object-cover rounded-xl flex-shrink-0"/>
-                : <div className="w-16 h-22 bg-green-100 rounded-xl flex items-center justify-center text-3xl flex-shrink-0">📘</div>
-              }
-              <div>
-                <p className="font-bold text-gray-800 text-sm leading-snug">{book.title}</p>
-                <p className="text-gray-500 text-xs mt-1">{book.author}</p>
-                <p className="text-green-700 text-xs mt-1">{book.category}</p>
-                <span className="mt-2 inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">
-                  {book.available} copies available
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Details */}
-          <div className="bg-green-50 rounded-2xl p-4 mb-6 space-y-3 text-sm">
-            <div className="flex justify-between">
-              <span className="text-gray-500">Library</span>
-              <span className="font-semibold text-green-800">
-                {library === 'HIGH_SCHOOL' ? '🏫 High School' : '🏛️ Main Library'}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-500">Status</span>
-              <span className="font-semibold text-yellow-700">⏳ Pending Approval</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-500">Processing Time</span>
-              <span className="font-semibold text-gray-700">1–2 business days</span>
-            </div>
-          </div>
-
-          <p className="text-xs text-gray-400 text-center mb-5">
-            By submitting, you agree to return the book by the due date assigned by library staff.
-          </p>
-
-          <div className="flex gap-3">
-            <button onClick={() => setStep(1)} disabled={submitting}
-              className="flex-1 border-2 border-green-200 text-green-700 font-semibold
-                py-3 rounded-2xl hover:bg-green-50 transition disabled:opacity-40">
-              ← Back
-            </button>
-            <button onClick={handleSubmit} disabled={submitting}
-              className="flex-1 bg-green-700 disabled:opacity-60 text-white font-semibold
-                py-3 rounded-2xl hover:bg-green-800 transition flex items-center justify-center gap-2">
-              {submitting
-                ? <><svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
-                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
-                      <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
-                    </svg> Submitting…</>
-                : '✓ Submit Request'
-              }
-            </button>
-          </div>
-        </div>
-      )}
-    </AppLayout>
-  )
+async function trackAndOpen(resource) {
+  // Fire-and-forget: don't block the navigation
+  api.post('/analytics/track', {
+    eventType:    'RESOURCE_CLICK',
+    resourceName: resource.label,
+    resourceUrl:  resource.href
+  }).catch(() => {})
+  window.open(resource.href, '_blank', 'noopener,noreferrer')
 }
-
-export async function getServerSideProps(ctx) {
-  const { getServerSession } = await import('next-auth/next')
-  const { authOptions }      = await import('../api/auth/[...nextauth]')
-  const session = await getServerSession(ctx.req, ctx.res, authOptions)
-  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
-  return { props: {} }
-}
-</file>
-
-<file path="pages/borrow/status.jsx">
-import { useState }    from 'react'
-import Link            from 'next/link'
-import AppLayout       from '../../components/layout/AppLayout'
-import BorrowCard      from '../../components/borrow/BorrowCard'
-import Spinner         from '../../components/ui/Spinner'
-import EmptyState      from '../../components/ui/EmptyState'
-import { useBorrows }  from '../../hooks/useBorrows'
-import { useBooks }    from '../../hooks/useBooks'
-
-const FILTERS = ['ALL', 'PENDING', 'APPROVED', 'REJECTED', 'RETURNED']
-
-export default function BorrowStatusPage() {
-  const [filter, setFilter] = useState('ALL')
-  const { borrows, loading } = useBorrows()
-  const { books }            = useBooks()
-
-  const bookMap = Object.fromEntries((books || []).map(b => [b.id, b]))
-
-  const filtered = filter === 'ALL'
-    ? borrows
-    : borrows.filter(b => b.status === filter)
-
-  const sorted = [...filtered].sort((a, b) =>
-    new Date(b.requestDate) - new Date(a.requestDate)
-  )
-
-  return (
-    <AppLayout title="My Borrow Status" back>
-      {/* Filter chips */}
-      <div className="flex gap-2 overflow-x-auto pb-2 mb-4 -mx-1 px-1 scrollbar-hide">
-        {FILTERS.map(f => (
-          <button key={f} onClick={() => setFilter(f)}
-            className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold border transition
-              ${filter === f
-                ? 'bg-green-700 text-white border-green-700'
-                : 'bg-white text-gray-600 border-gray-200 hover:border-green-300'}`}>
-            {f.charAt(0) + f.slice(1).toLowerCase()}
-            {f !== 'ALL' && (
-              <span className="ml-1 text-[10px] opacity-75">
-                ({borrows.filter(b => b.status === f).length})
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
-      {/* Borrow flow visual legend */}
-      <div className="bg-white rounded-2xl border border-green-100 shadow-card p-3 mb-5">
-        <p className="text-xs font-semibold text-green-700 mb-2">Borrow Flow</p>
-        <div className="flex items-center gap-1 text-[10px] text-gray-500 flex-wrap">
-          {['Select Library','Select Book','Submit','Pending','Approved / Rejected','Returned'].map((s, i, arr) => (
-            <span key={s} className="flex items-center gap-1">
-              <span className={`px-1.5 py-0.5 rounded font-medium
-                ${s.includes('Approved') ? 'bg-green-100 text-green-700'
-                : s === 'Pending'        ? 'bg-yellow-100 text-yellow-700'
-                : s === 'Returned'       ? 'bg-blue-100 text-blue-700'
-                : 'bg-gray-100 text-gray-600'}`}>{s}</span>
-              {i < arr.length - 1 && <span className="text-gray-300">→</span>}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {loading
-        ? <Spinner/>
-        : sorted.length === 0
-          ? <EmptyState
-              icon="📋"
-              title="No requests found"
-              subtitle={filter === 'ALL' ? 'You have no borrow requests yet.' : `No ${filter.toLowerCase()} requests.`}
-              action={
-                <Link href="/borrow"
-                  className="mt-2 inline-block bg-green-700 text-white px-5 py-2.5 rounded-xl text-sm font-semibold">
-                  Borrow a Book
-                </Link>
-              }
-            />
-          : <div className="space-y-4">
-              {sorted.map(b => (
-                <BorrowCard key={b.id} borrow={b} book={bookMap[b.bookId]}/>
-              ))}
-            </div>
-      }
-    </AppLayout>
-  )
-}
-
-export async function getServerSideProps(ctx) {
-  const { getServerSession } = await import('next-auth/next')
-  const { authOptions }      = await import('../api/auth/[...nextauth]')
-  const session = await getServerSession(ctx.req, ctx.res, authOptions)
-  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
-  return { props: {} }
-}
-</file>
-
-<file path="pages/dashboard.jsx">
-import { useSession }       from 'next-auth/react'
-import Link                 from 'next/link'
-import AppLayout            from '../components/layout/AppLayout'
-import StatusBadge          from '../components/ui/StatusBadge'
-import Avatar               from '../components/ui/Avatar'
-import Spinner              from '../components/ui/Spinner'
-import { useBorrows }       from '../hooks/useBorrows'
-import { useNotifications } from '../hooks/useNotifications'
-import { fmtDate }          from '../lib/utils'
 
 export default function Dashboard() {
   const { data: session, status } = useSession()
   const { borrows, loading } = useBorrows()
   const { notifications, unread, markRead } = useNotifications()
 
-  // Wait for session to load
   if (status === 'loading') return null
-
-  // Redirect if not logged in
   if (!session) {
     if (typeof window !== 'undefined') window.location.href = '/auth/signin'
     return null
@@ -3683,13 +3549,6 @@ export default function Dashboard() {
   const user    = session.user
   const recent  = borrows.slice(0, 3)
   const unreadN = notifications.filter(n => !n.isRead).slice(0, 3)
-
-  const QUICK = [
-    { href: '/borrow',        icon: '📖', label: 'Borrow a Book',  color: 'bg-green-700' },
-    { href: '/borrow/status', icon: '📋', label: 'My Requests',    color: 'bg-green-600' },
-    { href: '/chat',          icon: '💬', label: 'Chat Support',   color: 'bg-green-800' },
-    { href: '/profile',       icon: '👤', label: 'My Profile',     color: 'bg-green-500' }
-  ]
 
   return (
     <AppLayout title="MVGFC E-Library">
@@ -3712,6 +3571,25 @@ export default function Dashboard() {
             <span className="text-2xl">{q.icon}</span>
             <span className="text-white font-semibold text-sm">{q.label}</span>
           </Link>
+        ))}
+      </div>
+
+      {/* ── E-Resources ── */}
+      <h2 className="text-green-800 font-semibold text-sm mb-3">📚 E-Journals &amp; Open Access Databases</h2>
+      <div className="grid grid-cols-1 gap-3 mb-6">
+        {E_RESOURCES.map(r => (
+          <button key={r.key} onClick={() => trackAndOpen(r)}
+            className={`${r.color} rounded-2xl p-4 flex items-center gap-4 shadow-card hover:opacity-90 transition w-full text-left`}>
+            <span className="text-3xl">{r.icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-white font-bold text-sm">{r.label}</p>
+              <p className="text-white/70 text-xs mt-0.5">{r.sub}</p>
+            </div>
+            <svg className="w-5 h-5 text-white/70 flex-shrink-0" fill="none" stroke="currentColor"
+              strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+            </svg>
+          </button>
         ))}
       </div>
 
@@ -5944,6 +5822,51 @@ node_modules/
 .DS_Store
 </file>
 
+<file path="components/borrow/BookCard.jsx">
+import { useState } from 'react'
+import { toCoverUrl } from '../../lib/coverImage'
+
+export default function BookCard({ book, selected, onClick }) {
+  const avail    = book.available > 0
+  const coverUrl = toCoverUrl(book.coverImageUrl)
+  const [imgErr, setImgErr] = useState(false)
+
+  return (
+    <button onClick={avail ? onClick : undefined}
+      className={`w-full text-left p-3 rounded-xl border-2 transition-all flex gap-3 items-start
+        ${selected
+          ? 'border-green-600 bg-green-50'
+          : avail
+            ? 'border-gray-200 bg-white hover:border-green-300'
+            : 'border-gray-100 bg-gray-50 opacity-60 cursor-not-allowed'}`}>
+
+      {coverUrl && !imgErr
+        ? <img
+            src={coverUrl}
+            alt={book.title}
+            onError={() => setImgErr(true)}
+            className="w-12 h-16 object-cover rounded-lg flex-shrink-0 bg-green-50"
+          />
+        : <div className="w-12 h-16 bg-green-100 rounded-lg flex items-center justify-center flex-shrink-0 text-xl">
+            📚
+          </div>
+      }
+
+      <div className="flex-1 min-w-0">
+        <p className="font-semibold text-sm text-gray-800 truncate">{book.title}</p>
+        <p className="text-xs text-gray-500 mt-0.5 truncate">{book.author}</p>
+        <p className="text-xs text-green-700 mt-1 font-medium">{book.category}</p>
+        <span className={`mt-1 inline-block text-xs px-2 py-0.5 rounded-full font-semibold
+          ${avail ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'}`}>
+          {avail ? `${book.available} available` : 'Unavailable'}
+        </span>
+      </div>
+      {selected && <span className="text-green-600 text-lg flex-shrink-0">✔</span>}
+    </button>
+  )
+}
+</file>
+
 <file path="components/borrows/BorrowsTable.jsx">
 import StatusBadge from '../ui/StatusBadge'
 import Table       from '../ui/Table'
@@ -6625,6 +6548,27 @@ export function enqueue(fn) {
 }
 </file>
 
+<file path="next.config.js">
+const withPWA = require('next-pwa')({
+  dest: 'public',
+  disable: process.env.NODE_ENV === 'development',
+  register: true,
+  skipWaiting: true
+})
+
+module.exports = withPWA({
+  reactStrictMode: true,
+  images: {
+    domains: [
+      'drive.google.com',
+      'lh3.googleusercontent.com',
+      // Google Drive thumbnail endpoint (used by toCoverUrl helper)
+      'www.googleapis.com'
+    ]
+  }
+})
+</file>
+
 <file path="package.json">
 {
   "name": "mvgfc-elibrary",
@@ -6787,6 +6731,111 @@ async function handler(req, res) {
 }
 
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handler)
+</file>
+
+<file path="pages/api/borrows/[id]/renew.js">
+import { v4 as uuid } from 'uuid'
+import { compose }     from '../../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../../middleware/errorHandler'
+import { withAuth }    from '../../../../middleware/withAuth'
+import { rateLimiter } from '../../../../middleware/rateLimiter'
+import { trigger, ch } from '../../../../lib/pusher'
+import { readSheet, appendRow } from '../../../../lib/sheets'
+import {
+  SHEETS, COL, ROLES, BORROW_STATUS, THREAD_STATUS
+} from '../../../../lib/constants'
+
+// In-memory: track last renewal request per borrowId
+// Prevents spam even across multiple button taps before client lock kicks in
+const renewalCache = new Map()  // key: borrowId, value: timestamp
+const RENEWAL_COOLDOWN = 24 * 60 * 60 * 1000  // 24 hours
+
+// Cleanup old entries every hour
+setInterval(() => {
+  const cutoff = Date.now() - RENEWAL_COOLDOWN
+  for (const [key, ts] of renewalCache.entries()) {
+    if (ts < cutoff) renewalCache.delete(key)
+  }
+}, 60 * 60 * 1000)
+
+async function handlerRenew(req, res) {
+  if (req.method !== 'POST')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  if (req.user.role !== ROLES.USER)
+    httpError(403, 'Only borrowers can request renewals')
+
+  const { id } = req.query
+
+  // Server-side cooldown check
+  const cacheKey  = `${req.user.id}:${id}`
+  const lastSent  = renewalCache.get(cacheKey)
+  if (lastSent && (Date.now() - lastSent) < RENEWAL_COOLDOWN) {
+    const hoursAgo = Math.floor((Date.now() - lastSent) / 3600000)
+    return res.status(429).json({
+      success: false,
+      error: `You already sent a renewal request ${hoursAgo}h ago. Please wait for staff to respond.`
+    })
+  }
+
+  const borrows = await readSheet(SHEETS.BORROWS)
+  const borrow  = borrows.find(r => r[COL.BORROWS.ID] === id)
+
+  if (!borrow) httpError(404, 'Borrow request not found')
+  if (borrow[COL.BORROWS.USER_ID] !== req.user.id) httpError(403, 'Access denied')
+  if (borrow[COL.BORROWS.STATUS]  !== BORROW_STATUS.APPROVED)
+    httpError(400, 'Can only request renewal for approved borrows')
+
+  const location  = borrow[COL.BORROWS.LOCATION]
+  const bookId    = borrow[COL.BORROWS.BOOK_ID]
+  const dueDate   = borrow[COL.BORROWS.DUE_DATE]
+  const timestamp = new Date().toISOString()
+
+  const formattedDue = dueDate
+    ? new Date(dueDate).toLocaleDateString('en-PH', { year: 'numeric', month: 'long', day: 'numeric' })
+    : 'N/A'
+
+  const chatText = `📖 Renewal Request — Hi! I would like to request a renewal for Assc. No. ${bookId}. Current due date: ${formattedDue}. Please let me know if it can be extended. Thank you!`
+  const chatId   = uuid()
+
+  await appendRow(SHEETS.CHAT, [
+    chatId,
+    req.user.id,
+    req.user.id,
+    ROLES.USER,
+    'INQUIRY',
+    chatText,
+    timestamp,
+    'FALSE',
+    THREAD_STATUS.OPEN,
+    location
+  ])
+
+  // Record in cache AFTER successful write
+  renewalCache.set(cacheKey, Date.now())
+
+  await trigger(ch.chat(req.user.id), 'new-message', {
+    id:          chatId,
+    threadId:    req.user.id,
+    senderId:    req.user.id,
+    senderName:  req.user.name,
+    senderRole:  ROLES.USER,
+    messageText: chatText,
+    timestamp,
+    libraryLocation: location
+  })
+
+  await trigger(ch.adminInbox(location), 'new-chat-message', {
+    threadId: req.user.id,
+    userName: req.user.name,
+    preview:  chatText.substring(0, 80),
+    library:  location
+  })
+
+  res.json({ success: true, message: 'Renewal request sent to library staff.' })
+}
+
+export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerRenew)
 </file>
 
 <file path="pages/api/chat/messages.js">
@@ -7148,6 +7197,350 @@ async function handlerMe(req, res) {
 }
 
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
+</file>
+
+<file path="pages/borrow/index.jsx">
+import { useState }      from 'react'
+import { useRouter }     from 'next/router'
+import AppLayout         from '../../components/layout/AppLayout'
+import StepIndicator     from '../../components/borrow/StepIndicator'
+import LibraryCard       from '../../components/borrow/LibraryCard'
+import BookCard          from '../../components/borrow/BookCard'
+import Spinner           from '../../components/ui/Spinner'
+import EmptyState        from '../../components/ui/EmptyState'
+import Toast             from '../../components/ui/Toast'
+import { useBooks }      from '../../hooks/useBooks'
+import { useBorrows }    from '../../hooks/useBorrows'
+import { toCoverUrl }    from '../../lib/coverImage'
+
+const LIBRARIES = [
+  { id: 'HIGH_SCHOOL',  name: 'High School Department', description: 'Library for HS students and faculty.', icon: '🏫' },
+  { id: 'MAIN_LIBRARY', name: 'Main Library', description: 'Central academic library for all college departments.', icon: '🏛️' }
+]
+
+export default function BorrowPage() {
+  const router = useRouter()
+  const [step,       setStep]   = useState(0)
+  const [library,    setLib]    = useState(null)
+  const [book,       setBook]   = useState(null)
+  const [search,     setSearch] = useState('')
+  const [toast,      setToast]  = useState(null)
+  const [submitting, setSub]    = useState(false)
+  const [confirmImgErr, setConfirmImgErr] = useState(false)
+
+  const { books, loading: bLoading } = useBooks({ location: library, search })
+  const { submitBorrow }             = useBorrows()
+
+  // Reset confirm image error when book changes
+  function selectBook(b) {
+    setBook(b)
+    setConfirmImgErr(false)
+  }
+
+  async function handleSubmit() {
+    if (!book || !library) return
+    setSub(true)
+    try {
+      await submitBorrow(book.id, library)
+      setToast({ message: 'Borrow request submitted! Awaiting approval.', type: 'success' })
+      setTimeout(() => router.push('/borrow/status'), 1800)
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to submit request.', type: 'error' })
+    } finally {
+      setSub(false)
+    }
+  }
+
+  const confirmCover = toCoverUrl(book?.coverImageUrl)
+
+  return (
+    <AppLayout title="Borrow a Book" back={step > 0}>
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+      <StepIndicator current={step}/>
+
+      {/* STEP 0: Select Library */}
+      {step === 0 && (
+        <div>
+          <h2 className="text-green-800 font-bold text-lg mb-1">Select Library</h2>
+          <p className="text-gray-500 text-sm mb-5">Choose the library location you want to borrow from.</p>
+          <div className="space-y-3">
+            {LIBRARIES.map(lib => (
+              <LibraryCard key={lib.id} {...lib}
+                selected={library === lib.id}
+                onClick={() => setLib(lib.id)}
+              />
+            ))}
+          </div>
+          <button onClick={() => setStep(1)} disabled={!library}
+            className="mt-6 w-full bg-green-700 disabled:opacity-40 text-white font-semibold
+              py-3.5 rounded-2xl transition hover:bg-green-800">
+            Next: Browse Books →
+          </button>
+        </div>
+      )}
+
+      {/* STEP 1: Select Book */}
+      {step === 1 && (
+        <div>
+          <h2 className="text-green-800 font-bold text-lg mb-1">Select a Book</h2>
+          <p className="text-gray-500 text-sm mb-4">
+            {library === 'HIGH_SCHOOL' ? '🏫 High School Department' : '🏛️ Main Library'}
+          </p>
+          <div className="relative mb-4">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
+              fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+            </svg>
+            <input value={search} onChange={e => { setSearch(e.target.value); setBook(null) }}
+              placeholder="Search title or author…"
+              className="w-full pl-9 pr-4 py-2.5 rounded-xl border border-green-200 bg-white
+                text-sm focus:outline-none focus:ring-2 focus:ring-green-500"/>
+          </div>
+
+          {bLoading
+            ? <Spinner/>
+            : books.length === 0
+              ? <EmptyState icon="🔍" title="No books found"
+                  subtitle={search ? `No results for "${search}"` : 'No books at this location.'}/>
+              : <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
+                  {books.map(b => (
+                    <BookCard key={b.id} book={b}
+                      selected={book?.id === b.id}
+                      onClick={() => selectBook(b)}/>
+                  ))}
+                </div>
+          }
+
+          <div className="flex gap-3 mt-5">
+            <button onClick={() => setStep(0)}
+              className="flex-1 border-2 border-green-200 text-green-700 font-semibold
+                py-3 rounded-2xl hover:bg-green-50 transition">
+              ← Back
+            </button>
+            <button onClick={() => setStep(2)} disabled={!book}
+              className="flex-1 bg-green-700 disabled:opacity-40 text-white font-semibold
+                py-3 rounded-2xl hover:bg-green-800 transition">
+              Next: Confirm →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* STEP 2: Confirm */}
+      {step === 2 && book && (
+        <div>
+          <h2 className="text-green-800 font-bold text-lg mb-1">Confirm Request</h2>
+          <p className="text-gray-500 text-sm mb-5">Review your borrow request before submitting.</p>
+
+          <div className="bg-white rounded-2xl border border-green-100 shadow-card p-5 mb-5">
+            <div className="flex gap-4">
+              {confirmCover && !confirmImgErr
+                ? <img
+                    src={confirmCover}
+                    alt={book.title}
+                    onError={() => setConfirmImgErr(true)}
+                    className="w-16 h-[88px] object-cover rounded-xl flex-shrink-0 bg-green-50"
+                  />
+                : <div className="w-16 h-[88px] bg-green-100 rounded-xl flex items-center
+                    justify-center text-3xl flex-shrink-0">📚</div>
+              }
+              <div>
+                <p className="font-bold text-gray-800 text-sm leading-snug">{book.title}</p>
+                <p className="text-gray-500 text-xs mt-1">{book.author}</p>
+                {book.year && <p className="text-gray-400 text-xs mt-0.5">{book.year}</p>}
+                <p className="text-green-700 text-xs mt-1">{book.category}</p>
+                <span className="mt-2 inline-block bg-green-100 text-green-700 text-xs
+                  px-2 py-0.5 rounded-full font-semibold">
+                  {book.available} {book.available === 1 ? 'copy' : 'copies'} available
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-green-50 rounded-2xl p-4 mb-6 space-y-3 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-500">Library</span>
+              <span className="font-semibold text-green-800">
+                {library === 'HIGH_SCHOOL' ? '🏫 High School' : '🏛️ Main Library'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Status</span>
+              <span className="font-semibold text-yellow-700">⏳ Pending Approval</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Processing Time</span>
+              <span className="font-semibold text-gray-700">1–2 business days</span>
+            </div>
+          </div>
+
+          <p className="text-xs text-gray-400 text-center mb-5">
+            By submitting, you agree to return the book by the due date assigned by library staff.
+          </p>
+
+          <div className="flex gap-3">
+            <button onClick={() => setStep(1)} disabled={submitting}
+              className="flex-1 border-2 border-green-200 text-green-700 font-semibold
+                py-3 rounded-2xl hover:bg-green-50 transition disabled:opacity-40">
+              ← Back
+            </button>
+            <button onClick={handleSubmit} disabled={submitting}
+              className="flex-1 bg-green-700 disabled:opacity-60 text-white font-semibold
+                py-3 rounded-2xl hover:bg-green-800 transition flex items-center justify-center gap-2">
+              {submitting
+                ? <><svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
+                      <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
+                    </svg>Submitting…</>
+                : '✔ Submit Request'
+              }
+            </button>
+          </div>
+        </div>
+      )}
+    </AppLayout>
+  )
+}
+
+export async function getServerSideProps(ctx) {
+  const { getServerSession } = await import('next-auth/next')
+  const { authOptions }      = await import('../api/auth/[...nextauth]')
+  const session = await getServerSession(ctx.req, ctx.res, authOptions)
+  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
+  return { props: {} }
+}
+</file>
+
+<file path="pages/borrow/status.jsx">
+import { useState, useMemo } from 'react'
+import Link                  from 'next/link'
+import AppLayout             from '../../components/layout/AppLayout'
+import BorrowCard            from '../../components/borrow/BorrowCard'
+import Spinner               from '../../components/ui/Spinner'
+import EmptyState            from '../../components/ui/EmptyState'
+import { useBorrows }        from '../../hooks/useBorrows'
+import { useBooks }          from '../../hooks/useBooks'
+
+const FILTERS = ['ALL', 'PENDING', 'APPROVED', 'OVERDUE', 'REJECTED', 'RETURNED']
+
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
+}
+
+export default function BorrowStatusPage() {
+  const [filter, setFilter] = useState('ALL')
+  const { borrows, loading } = useBorrows()
+  const { books }            = useBooks()
+
+  const bookMap = Object.fromEntries((books || []).map(b => [b.id, b]))
+
+  // Compute overdue count for badge
+  const overdueCount = useMemo(() =>
+    borrows.filter(b => b.status === 'APPROVED' && getDaysOverdue(b.dueDate) > 0).length,
+    [borrows]
+  )
+
+  // Filter logic — OVERDUE is a computed subset of APPROVED
+  const filtered = useMemo(() => {
+    if (filter === 'ALL')     return borrows
+    if (filter === 'OVERDUE') return borrows.filter(b =>
+      b.status === 'APPROVED' && getDaysOverdue(b.dueDate) > 0
+    )
+    return borrows.filter(b => b.status === filter)
+  }, [borrows, filter])
+
+  const sorted = [...filtered].sort((a, b) =>
+    new Date(b.requestDate) - new Date(a.requestDate)
+  )
+
+  // Badge counts per filter chip
+  function chipCount(f) {
+    if (f === 'ALL')     return borrows.length
+    if (f === 'OVERDUE') return overdueCount
+    return borrows.filter(b => b.status === f).length
+  }
+
+  return (
+    <AppLayout title="My Borrow Status" back>
+      {/* Filter chips */}
+      <div className="flex gap-2 overflow-x-auto pb-2 mb-4 -mx-1 px-1 scrollbar-hide">
+        {FILTERS.map(f => {
+          const count   = chipCount(f)
+          const isActive = filter === f
+          const isOverdue = f === 'OVERDUE'
+
+          return (
+            <button key={f} onClick={() => setFilter(f)}
+              className={`relative flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold border transition
+                ${isActive
+                  ? isOverdue
+                    ? 'bg-red-600 text-white border-red-600'
+                    : 'bg-green-700 text-white border-green-700'
+                  : isOverdue && overdueCount > 0
+                    ? 'bg-white text-red-600 border-red-300 hover:border-red-500'
+                    : 'bg-white text-gray-600 border-gray-200 hover:border-green-300'}`}>
+              {f.charAt(0) + f.slice(1).toLowerCase()}
+              <span className={`ml-1 text-[10px] opacity-75`}>
+                ({count})
+              </span>
+              {/* Red dot for overdue when not active */}
+              {isOverdue && overdueCount > 0 && !isActive && (
+                <span className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full"/>
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Borrow flow legend */}
+      <div className="bg-white rounded-2xl border border-green-100 shadow-card p-3 mb-5">
+        <p className="text-xs font-semibold text-green-700 mb-2">Borrow Flow</p>
+        <div className="flex items-center gap-1 text-[10px] text-gray-500 flex-wrap">
+          {['Select Library','Select Book','Submit','Pending','Approved','Overdue','Returned'].map((s, i, arr) => (
+            <span key={s} className="flex items-center gap-1">
+              <span className={`px-1.5 py-0.5 rounded font-medium
+                ${s === 'Approved'  ? 'bg-green-100 text-green-700'
+                : s === 'Pending'   ? 'bg-yellow-100 text-yellow-700'
+                : s === 'Overdue'   ? 'bg-red-100 text-red-700'
+                : s === 'Returned'  ? 'bg-blue-100 text-blue-700'
+                : 'bg-gray-100 text-gray-600'}`}>{s}</span>
+              {i < arr.length - 1 && <span className="text-gray-300">→</span>}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {loading
+        ? <Spinner/>
+        : sorted.length === 0
+          ? <EmptyState
+              icon={filter === 'OVERDUE' ? '✅' : '📋'}
+              title={filter === 'OVERDUE' ? 'No overdue books!' : 'No requests found'}
+              subtitle={
+                filter === 'OVERDUE' ? 'All your borrowed books are within their due dates.' :
+                filter === 'ALL' ? 'You have no borrow requests yet.' :
+                `No ${filter.toLowerCase()} requests.`
+              }
+            />
+          : <div className="space-y-4">
+              {sorted.map(b => (
+                <BorrowCard key={b.id} borrow={b} book={bookMap[b.bookId]}/>
+              ))}
+            </div>
+      }
+    </AppLayout>
+  )
+}
+
+export async function getServerSideProps(ctx) {
+  const { getServerSession } = await import('next-auth/next')
+  const { authOptions }      = await import('../api/auth/[...nextauth]')
+  const session = await getServerSession(ctx.req, ctx.res, authOptions)
+  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
+  return { props: {} }
+}
 </file>
 
 <file path="pages/dashboard/borrows.jsx">
@@ -7598,109 +7991,6 @@ body {
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
 </file>
 
-<file path="components/borrow/BorrowCard.jsx">
-import { useState }  from 'react'
-import StatusBadge    from '../ui/StatusBadge'
-import Toast          from '../ui/Toast'
-import { fmtDate }    from '../../lib/utils'
-import api            from '../../lib/api'
-
-function getDaysOverdue(dueDate) {
-  if (!dueDate) return 0
-  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
-}
-
-export default function BorrowCard({ borrow, book }) {
-  const [renewing, setRenewing] = useState(false)
-  const [toast,    setToast]    = useState(null)
-
-  const isApproved  = borrow.status === 'APPROVED'
-  const daysOverdue = isApproved ? getDaysOverdue(borrow.dueDate) : 0
-  const isOverdue   = daysOverdue > 0
-
-  // Determine the displayed status — show OVERDUE when applicable
-  const displayStatus = isOverdue ? 'OVERDUE' : borrow.status
-
-  async function handleRenew() {
-    setRenewing(true)
-    try {
-      await api.post(`/borrows/${borrow.id}/renew`)
-      setToast({ message: 'Renewal request sent to library staff!', type: 'success' })
-    } catch (err) {
-      setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
-    } finally {
-      setRenewing(false)
-    }
-  }
-
-  return (
-    <div className={`bg-white rounded-2xl border shadow-card p-4
-      ${isOverdue ? 'border-red-200' : 'border-green-100'}`}>
-
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
-
-      <div className="flex gap-3 items-start">
-        {book?.coverImageUrl
-          ? <img src={book.coverImageUrl} alt={book.title} className="w-10 h-14 object-cover rounded-lg flex-shrink-0"/>
-          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📚</div>
-        }
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold text-gray-800 truncate">
-            {book?.title || `Assc. No. ${borrow.bookId}`}
-          </p>
-          <p className="text-xs text-gray-500 truncate">{book?.author}</p>
-          <p className="text-xs text-green-700 mt-1">{borrow.location?.replace('_', ' ')}</p>
-        </div>
-
-        <div className="flex flex-col items-end gap-1">
-          <StatusBadge status={displayStatus}/>
-          {isOverdue && (
-            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
-              ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
-              {daysOverdue}d overdue
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-3 pt-3 border-t border-green-50 grid grid-cols-2 gap-2">
-        <div>
-          <p className="text-[10px] text-gray-400 uppercase font-medium">Requested</p>
-          <p className="text-xs text-gray-700">{fmtDate(borrow.requestDate)}</p>
-        </div>
-        {borrow.dueDate && (
-          <div>
-            <p className="text-[10px] text-gray-400 uppercase font-medium">Due Date</p>
-            <p className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-700'}`}>
-              {fmtDate(borrow.dueDate)}
-            </p>
-          </div>
-        )}
-        {borrow.notes && (
-          <div className="col-span-2">
-            <p className="text-[10px] text-gray-400 uppercase font-medium">Note</p>
-            <p className="text-xs text-gray-600">{borrow.notes}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Renew button — only for approved borrows (overdue or not) */}
-      {isApproved && (
-        <button
-          onClick={handleRenew}
-          disabled={renewing}
-          className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
-            ${isOverdue
-              ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
-              : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
-          {renewing ? 'Sending request…' : '🔄 Request Renewal'}
-        </button>
-      )}
-    </div>
-  )
-}
-</file>
-
 <file path="components/layout/BottomNav.jsx">
 import Link      from 'next/link'
 import { useRouter } from 'next/router'
@@ -7762,10 +8052,17 @@ export const NOTIF_TYPE = {
   BORROW_APPROVED:  'BORROW_APPROVED',
   BORROW_REJECTED:  'BORROW_REJECTED',
   BORROW_DUE:       'BORROW_DUE',
-  BORROW_RENEWED:   'BORROW_RENEWED',   // NEW — renewal request notification
+  BORROW_RENEWED:   'BORROW_RENEWED',
   CHAT_REPLY:       'CHAT_REPLY',
   ACCOUNT_STATUS:   'ACCOUNT_STATUS'
 }
+
+export const EVENT_TYPE = {
+  RESOURCE_CLICK: 'RESOURCE_CLICK',
+  PAGE_VISIT:     'PAGE_VISIT'
+}
+
+export const INSTITUTES = ['INAJS', 'ICJE', 'IICT', 'IBM', 'CPTE']
 
 // Exact Google Sheet tab names
 export const SHEETS = {
@@ -7774,9 +8071,9 @@ export const SHEETS = {
   BOOKS_HS:      'Books_HighSchool',
   BORROWS:       'BorrowRequests',
   CHAT:          'ChatMessages',
-  NOTIFICATIONS: 'Notifications'
+  NOTIFICATIONS: 'Notifications',
+  ANALYTICS:     'Analytics'       // NEW — add this tab in Google Sheets
 }
-
 
 export const COL = {
   USERS: {
@@ -7784,10 +8081,9 @@ export const COL = {
     STATUS:5, GOOGLE_ID:6, CREATED:7, LAST_LOGIN:8,
     USER_TYPE:9, STUDENT_ID:10, YEAR:11, SECTION:12,
     EMPLOYEE_NUM:13, POSITION:14, OFFICE:15, ASSIGNED_LIBRARY:16,
-    PASSWORD:17
+    PASSWORD:17, INSTITUTE:18          // NEW — append column S in sheet
   },
   BOOKS: {
-    // Col 0 label in Sheet: "Assc. No."  |  Col 3 label in Sheet: "Year"
     ID:0, TITLE:1, AUTHOR:2, YEAR:3, CATEGORY:4, LOCATION:5,
     TOTAL:6, AVAILABLE:7, DESC:8, COVER:9, ADDED_AT:10, ADDED_BY:11
   },
@@ -7803,12 +8099,15 @@ export const COL = {
   NOTIFS: {
     ID:0, RECIPIENT_ID:1, TYPE:2, TITLE:3, MESSAGE:4,
     RELATED_ID:5, IS_READ:6, CREATED:7
+  },
+  // Analytics sheet: ID | UserID | EventType | ResourceName | ResourceURL | Timestamp
+  ANALYTICS: {
+    ID:0, USER_ID:1, EVENT_TYPE:2, RESOURCE_NAME:3, RESOURCE_URL:4, TIMESTAMP:5
   }
 }
 
 export const LETTER = (n) => String.fromCharCode(65 + n)
 
-// Helper: Get correct books sheet name based on library location
 export function getBooksSheet(libraryLocation) {
   return libraryLocation === LIBRARY.HIGH_SCHOOL ? SHEETS.BOOKS_HS : SHEETS.BOOKS_MAIN
 }
@@ -8384,6 +8683,121 @@ export async function getServerSideProps(ctx) {
   const session = await getServerSession(ctx.req, ctx.res, authOptions)
   if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
   return { props: {} }
+}
+</file>
+
+<file path="components/borrow/BorrowCard.jsx">
+import { useState }     from 'react'
+import StatusBadge       from '../ui/StatusBadge'
+import Toast             from '../ui/Toast'
+import { fmtDate }       from '../../lib/utils'
+import { toCoverUrl }    from '../../lib/coverImage'
+import api               from '../../lib/api'
+
+function getDaysOverdue(dueDate) {
+  if (!dueDate) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(dueDate)) / 86400000))
+}
+
+export default function BorrowCard({ borrow, book }) {
+  const [renewing, setRenewing] = useState(false)
+  const [renewed,  setRenewed]  = useState(false)
+  const [toast,    setToast]    = useState(null)
+  const [imgErr,   setImgErr]   = useState(false)
+
+  const isApproved    = borrow.status === 'APPROVED'
+  const daysOverdue   = isApproved ? getDaysOverdue(borrow.dueDate) : 0
+  const isOverdue     = daysOverdue > 0
+  const displayStatus = isOverdue ? 'OVERDUE' : borrow.status
+  const coverUrl      = toCoverUrl(book?.coverImageUrl)
+
+  async function handleRenew() {
+    if (renewing || renewed) return
+    setRenewing(true)
+    try {
+      await api.post(`/borrows/${borrow.id}/renew`)
+      setRenewed(true)
+      setToast({ message: 'Renewal request sent! Staff will reply in your chat.', type: 'success' })
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to send renewal request.', type: 'error' })
+    } finally {
+      setRenewing(false)
+    }
+  }
+
+  return (
+    <div className={`bg-white rounded-2xl border shadow-card p-4
+      ${isOverdue ? 'border-red-200' : 'border-green-100'}`}>
+
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+
+      <div className="flex gap-3 items-start">
+        {coverUrl && !imgErr
+          ? <img
+              src={coverUrl}
+              alt={book?.title}
+              onError={() => setImgErr(true)}
+              className="w-10 h-14 object-cover rounded-lg flex-shrink-0 bg-green-50"
+            />
+          : <div className="w-10 h-14 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">
+              📚
+            </div>
+        }
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-gray-800 truncate">
+            {book?.title || `Assc. No. ${borrow.bookId}`}
+          </p>
+          <p className="text-xs text-gray-500 truncate">{book?.author}</p>
+          <p className="text-xs text-green-700 mt-1">{borrow.location?.replace('_', ' ')}</p>
+        </div>
+
+        <div className="flex flex-col items-end gap-1">
+          <StatusBadge status={displayStatus}/>
+          {isOverdue && (
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full
+              ${daysOverdue > 7 ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}>
+              {daysOverdue}d overdue
+            </span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 pt-3 border-t border-green-50 grid grid-cols-2 gap-2">
+        <div>
+          <p className="text-[10px] text-gray-400 uppercase font-medium">Requested</p>
+          <p className="text-xs text-gray-700">{fmtDate(borrow.requestDate)}</p>
+        </div>
+        {borrow.dueDate && (
+          <div>
+            <p className="text-[10px] text-gray-400 uppercase font-medium">Due Date</p>
+            <p className={`text-xs font-medium ${isOverdue ? 'text-red-600' : 'text-gray-700'}`}>
+              {fmtDate(borrow.dueDate)}
+            </p>
+          </div>
+        )}
+        {borrow.notes && (
+          <div className="col-span-2">
+            <p className="text-[10px] text-gray-400 uppercase font-medium">Note</p>
+            <p className="text-xs text-gray-600">{borrow.notes}</p>
+          </div>
+        )}
+      </div>
+
+      {isApproved && (
+        <button
+          onClick={handleRenew}
+          disabled={renewing || renewed}
+          className={`mt-3 w-full py-2 rounded-xl text-xs font-semibold transition
+            ${renewed
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+              : isOverdue
+                ? 'bg-red-600 hover:bg-red-700 text-white disabled:opacity-50'
+                : 'bg-green-100 hover:bg-green-200 text-green-800 disabled:opacity-50'}`}>
+          {renewing ? 'Sending…' : renewed ? '✔ Renewal Requested' : '🔄 Request Renewal'}
+        </button>
+      )}
+    </div>
+  )
 }
 </file>
 
