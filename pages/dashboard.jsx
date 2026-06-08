@@ -4,6 +4,7 @@ import AppLayout             from '../components/layout/AppLayout'
 import StatusBadge           from '../components/ui/StatusBadge'
 import Avatar                from '../components/ui/Avatar'
 import Spinner               from '../components/ui/Spinner'
+import Logo                  from '../components/ui/Logo'
 import { useBorrows }        from '../hooks/useBorrows'
 import { useNotifications }  from '../hooks/useNotifications'
 import { fmtDate }           from '../lib/utils'
@@ -16,7 +17,7 @@ const E_RESOURCES = [
     icon:  '🌐',
     label: 'Open Access Databases',
     sub:   'Free scholarly resources',
-    color: 'bg-blue-700'
+    color: 'bg-green-700'
   },
   {
     key:   'e-journals',
@@ -24,7 +25,7 @@ const E_RESOURCES = [
     icon:  '📰',
     label: 'E-Journal Institutes',
     sub:   'Academic journal access',
-    color: 'bg-indigo-700'
+    color: 'bg-green-800'
   }
 ]
 
@@ -38,7 +39,6 @@ const QUICK = [
 async function trackAndOpen(resource) {
   // Fire-and-forget: don't block the navigation
   api.post('/analytics/track', {
-    eventType:    'RESOURCE_CLICK',
     resourceName: resource.label,
     resourceUrl:  resource.href
   }).catch(() => {})
@@ -64,7 +64,10 @@ export default function Dashboard() {
     <AppLayout title="MVGFC E-Library">
       {/* Greeting card */}
       <div className="bg-green-700 rounded-2xl p-5 mb-5 flex items-center gap-4 shadow-card">
-        <Avatar name={user.name} image={user.image} size={14}/>
+        <div className="flex-shrink-0 flex items-center gap-3">
+          <Logo size={10} dark={true}/>
+          <Avatar name={user.name} image={user.image} size={12}/>
+        </div>
         <div className="flex-1 min-w-0">
           <p className="text-green-200 text-xs">Good {greeting()},</p>
           <p className="text-white font-bold text-base truncate">{user.name}</p>

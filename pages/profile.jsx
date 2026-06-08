@@ -1,20 +1,19 @@
-
 import { signOut, useSession } from 'next-auth/react'
 import { useState }            from 'react'
 import AppLayout               from '../components/layout/AppLayout'
 import Avatar                  from '../components/ui/Avatar'
-import StatusBadge             from '../components/ui/StatusBadge'
 import Spinner                 from '../components/ui/Spinner'
+import Logo                    from '../components/ui/Logo'
 import { useNotifications }    from '../hooks/useNotifications'
 import { useBorrows }          from '../hooks/useBorrows'
-import { fmtDate, fmtTime }   from '../lib/utils'
+import { fmtDate, fmtTime }    from '../lib/utils'
 
 export default function ProfilePage() {
-  const { data: session }                   = useSession()
-  const [showAllNotifs, setShowAllNotifs]   = useState(false)
-  const [signingOut, setSigningOut]         = useState(false)
+  const { data: session }                 = useSession()
+  const [showAllNotifs, setShowAllNotifs] = useState(false)
+  const [signingOut, setSigningOut]       = useState(false)
   const { notifications, markRead, loading: nLoading } = useNotifications()
-  const { borrows }                         = useBorrows()
+  const { borrows } = useBorrows()
 
   if (!session) return null
   const user = session.user
@@ -35,17 +34,30 @@ export default function ProfilePage() {
 
   const STAT_ITEMS = [
     { label: 'Total',    value: stats.total,    color: 'text-green-700' },
-    { label: 'Active',   value: stats.active,   color: 'text-blue-600' },
-    { label: 'Returned', value: stats.returned, color: 'text-gray-600' },
-    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600' }
+    { label: 'Active',   value: stats.active,   color: 'text-green-600' },
+    { label: 'Returned', value: stats.returned, color: 'text-gray-600'  },
+    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600'}
   ]
 
   return (
     <AppLayout title="My Profile">
-      {/* Profile card */}
+
+      {/* ── Profile card ── */}
       <div className="bg-green-700 rounded-3xl p-5 mb-5 shadow-card">
+        {/* School branding strip */}
+        <div className="flex items-center gap-3 mb-4 pb-3 border-b border-green-600">
+          <Logo size={10} dark={true}/>
+          <div className="min-w-0">
+            <p className="text-white font-bold text-sm leading-tight truncate">
+              Manuel V. Gallego Foundation Colleges
+            </p>
+            <p className="text-green-300 text-[10px]">MVGFC E-Library System</p>
+          </div>
+        </div>
+
+        {/* User info */}
         <div className="flex items-center gap-4">
-          <Avatar name={user.name} image={user.image} size={16}/>
+          <Avatar name={user.name} image={user.image} size={14}/>
           <div className="flex-1 min-w-0">
             <p className="text-white font-bold text-base truncate">{user.name}</p>
             <p className="text-green-200 text-xs truncate">{user.email}</p>
@@ -63,87 +75,114 @@ export default function ProfilePage() {
         </div>
       </div>
 
-      {/* Stats */}
+      {/* ── Stats ── */}
       <div className="grid grid-cols-4 gap-2 mb-5">
         {STAT_ITEMS.map(s => (
-          <div key={s.label} className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
+          <div key={s.label}
+            className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
             <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
             <p className="text-[10px] text-gray-400 mt-0.5 font-medium">{s.label}</p>
           </div>
         ))}
       </div>
 
-      {/* Account info */}
+      {/* ── Account info ── */}
       <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
         <div className="px-4 py-3 border-b border-green-50">
           <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Account Information</p>
         </div>
         {[
-          { label: 'Full Name',   value: user.name },
-          { label: 'Email',       value: user.email },
-          { label: 'Role',        value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
-          { label: 'Department',  value: user.dept || '—' },
-          { label: 'Status',      value: <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">Active</span> }
+          { label: 'Full Name',  value: user.name },
+          { label: 'Email',      value: user.email },
+          { label: 'Role',       value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
+          { label: 'Department', value: user.dept || '—' },
+          { label: 'Status',
+            value: (
+              <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">
+                Active
+              </span>
+            )
+          }
         ].map(row => (
-          <div key={row.label} className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+          <div key={row.label}
+            className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
             <span className="text-xs text-gray-500 font-medium">{row.label}</span>
-            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">{row.value}</span>
+            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">
+              {row.value}
+            </span>
           </div>
         ))}
       </div>
 
+      {/* ── Type-specific fields ── */}
+      {user.userType === 'student' && (
+        <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
+          <div className="px-4 py-3 border-b border-green-50">
+            <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Student Details</p>
+          </div>
+          {[
+            { label: 'Student ID',   value: user.studentId },
+            { label: 'Year & Section', value: `${user.year} — ${user.section}` }
+          ].map(row => (
+            <div key={row.label}
+              className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+              <span className="text-xs text-gray-500 font-medium">{row.label}</span>
+              <span className="text-xs text-gray-800 font-semibold">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
-        {user.userType === 'student' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Student ID</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.studentId}</span>
+      {user.userType === 'employee' && (
+        <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
+          <div className="px-4 py-3 border-b border-green-50">
+            <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Employee Details</p>
+          </div>
+          {[
+            { label: 'Employee No.', value: user.employeeNum },
+            { label: 'Position',     value: user.position    },
+            { label: 'Office',       value: user.office      }
+          ].map(row => (
+            <div key={row.label}
+              className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+              <span className="text-xs text-gray-500 font-medium">{row.label}</span>
+              <span className="text-xs text-gray-800 font-semibold">{row.value}</span>
             </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Year & Section</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.year} - {user.section}</span>
-            </div>
-          </>
-        )}
+          ))}
+        </div>
+      )}
 
-        {user.userType === 'employee' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Employee No.</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.employeeNum}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Position</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.position}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Office</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.office}</span>
-            </div>
-          </>
-        )}
-
-      {/* Notifications */}
+      {/* ── Notifications ── */}
       <div className="mb-5">
         <div className="flex items-center justify-between mb-3">
           <p className="text-sm font-bold text-green-800">Notifications</p>
-          <span className="text-xs text-gray-400">{notifications.filter(n => !n.isRead).length} unread</span>
+          <span className="text-xs text-gray-400">
+            {notifications.filter(n => !n.isRead).length} unread
+          </span>
         </div>
+
         {nLoading
-          ? <Spinner className="w-6 h-6"/>
+          ? <Spinner/>
           : notifications.length === 0
-            ? <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
+            ? (
+              <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
                 <p className="text-2xl mb-1">🔔</p>
                 <p className="text-xs text-gray-400">No notifications yet.</p>
               </div>
-            : <>
+            )
+            : (
+              <>
                 <div className="space-y-2">
                   {visibleNotifs.map(n => (
                     <div key={n.id} onClick={() => !n.isRead && markRead(n.id)}
                       className={`bg-white rounded-xl border shadow-card p-3 transition cursor-pointer
-                        ${n.isRead ? 'border-green-50 opacity-70' : 'border-green-200 hover:bg-green-50'}`}>
+                        ${n.isRead
+                          ? 'border-green-50 opacity-70'
+                          : 'border-green-200 hover:bg-green-50'}`}>
                       <div className="flex gap-2">
-                        {!n.isRead && <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>}
+                        {!n.isRead && (
+                          <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>
+                        )}
                         <div className="flex-1 min-w-0">
                           <p className="text-xs font-semibold text-gray-800">{n.title}</p>
                           <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.message}</p>
@@ -156,14 +195,17 @@ export default function ProfilePage() {
                 {notifications.length > 5 && (
                   <button onClick={() => setShowAllNotifs(!showAllNotifs)}
                     className="mt-2 w-full text-center text-xs text-green-600 font-semibold py-2">
-                    {showAllNotifs ? '▲ Show less' : `▼ Show all ${notifications.length} notifications`}
+                    {showAllNotifs
+                      ? '▲ Show less'
+                      : `▼ Show all ${notifications.length} notifications`}
                   </button>
                 )}
               </>
+            )
         }
       </div>
 
-      {/* Sign out */}
+      {/* ── Sign out ── */}
       <button onClick={handleSignOut} disabled={signingOut}
         className="w-full border-2 border-red-200 text-red-500 font-semibold py-3.5 rounded-2xl
           hover:bg-red-50 transition disabled:opacity-50 mb-8">

@@ -6,6 +6,7 @@ import MessageBubble       from '../components/chat/MessageBubble'
 import ComplaintTag        from '../components/chat/ComplaintTag'
 import Spinner             from '../components/ui/Spinner'
 import Toast               from '../components/ui/Toast'
+import Logo                from '../components/ui/Logo'
 import { useChat }         from '../hooks/useChat'
 import { useNotifications } from '../hooks/useNotifications'
 
@@ -29,7 +30,7 @@ function fmtTime(iso) {
 }
 
 export default function ChatPage() {
-  const router  = useRouter()
+  const router = useRouter()
   const { data: session }  = useSession()
   const { notifications, markRead } = useNotifications()
   const {
@@ -41,29 +42,25 @@ export default function ChatPage() {
 
   const userId = session?.user?.id
 
-  // New ticket form state
   const [showNewForm, setShowNewForm] = useState(false)
   const [newMsgType,  setNewMsgType]  = useState(null)
   const [newLibrary,  setNewLibrary]  = useState(null)
   const [newText,     setNewText]     = useState('')
   const [startingNew, setStartingNew] = useState(false)
 
-  // Active thread reply state
   const [replyText,  setReplyText]  = useState('')
   const [isSending,  setIsSending]  = useState(false)
   const submitLockRef = useRef(false)
   const lastSubmitRef = useRef(0)
 
   const [toast, setToast] = useState(null)
-  const bottomRef    = useRef(null)
-  const textareaRef  = useRef(null)
+  const bottomRef   = useRef(null)
+  const textareaRef = useRef(null)
 
-  // Auto-scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Auto-clear chat-reply notifications on open
   useEffect(() => {
     if (!notifications.length) return
     notifications
@@ -75,20 +72,16 @@ export default function ChatPage() {
   const activeThread = threads.find(t => t.threadId === activeThreadId) || null
   const isResolved   = activeThread?.threadStatus === 'RESOLVED'
 
-  // ── Create new ticket ────────────────────────────────────────────────────
   async function handleCreateTicket() {
     if (!newText.trim() || !newMsgType || !newLibrary) {
       setToast({ message: 'Please fill in all fields', type: 'error' })
       return
     }
     setStartingNew(true)
-    const newThreadId = uuid()  // client-generated UUID = new ticket
+    const newThreadId = uuid()
     try {
       await sendMessage(newText.trim(), newMsgType, newLibrary, newThreadId)
-      setShowNewForm(false)
-      setNewText('')
-      setNewMsgType(null)
-      setNewLibrary(null)
+      setShowNewForm(false); setNewText(''); setNewMsgType(null); setNewLibrary(null)
       setActiveThreadId(newThreadId)
     } catch (err) {
       setToast({ message: err.message || 'Failed to create ticket.', type: 'error' })
@@ -97,16 +90,15 @@ export default function ChatPage() {
     }
   }
 
-  // ── Reply to active thread ───────────────────────────────────────────────
   async function handleReply() {
     const trimmed = replyText.trim()
     if (!trimmed || submitLockRef.current || isSending || isResolved) return
     const now = Date.now()
     if (now - lastSubmitRef.current < 1000) return
 
-    submitLockRef.current   = true
+    submitLockRef.current = true
     setIsSending(true)
-    lastSubmitRef.current   = now
+    lastSubmitRef.current = now
     setReplyText('')
 
     try {
@@ -124,8 +116,7 @@ export default function ChatPage() {
 
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      e.stopPropagation()
+      e.preventDefault(); e.stopPropagation()
       if (!submitLockRef.current && !isSending) handleReply()
     }
   }
@@ -136,12 +127,13 @@ export default function ChatPage() {
     <div className="min-h-screen bg-green-50 flex flex-col safe-top">
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
 
-      {/* Top bar */}
+      {/* ── Top bar ── */}
       <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30">
+        {/* Back / Logo */}
         {activeThreadId
           ? (
             <button onClick={() => setActiveThreadId(null)}
-              className="p-1 rounded-full hover:bg-green-700 transition">
+              className="p-1 rounded-full hover:bg-green-700 transition flex-shrink-0">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
               </svg>
@@ -149,19 +141,19 @@ export default function ChatPage() {
           )
           : (
             <button onClick={() => router.back()}
-              className="p-1 rounded-full hover:bg-green-700 transition">
+              className="p-1 rounded-full hover:bg-green-700 transition flex-shrink-0">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
               </svg>
             </button>
           )
         }
-        <div className="w-9 h-9 rounded-full bg-green-600 flex items-center justify-center flex-shrink-0">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round"
-              d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-          </svg>
+
+        {/* Logo */}
+        <div className="flex-shrink-0">
+          <Logo size={8} dark={true}/>
         </div>
+
         <div className="flex-1 min-w-0">
           <p className="font-semibold text-sm">
             {activeThreadId
@@ -174,20 +166,20 @@ export default function ChatPage() {
               : `${threads.length} ticket${threads.length !== 1 ? 's' : ''}`}
           </p>
         </div>
+
         {!activeThreadId && (
-          <button
-            onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
-            className="bg-white text-green-800 text-xs font-bold px-3 py-1.5 rounded-xl hover:bg-green-100 transition flex-shrink-0">
+          <button onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
+            className="bg-white text-green-800 text-xs font-bold px-3 py-1.5 rounded-xl
+              hover:bg-green-100 transition flex-shrink-0">
             + New Ticket
           </button>
         )}
       </header>
 
-      {/* ── THREAD LIST VIEW ─────────────────────────────────────────────── */}
+      {/* ── Thread list ── */}
       {!activeThreadId && (
         <div className="flex-1 overflow-y-auto max-w-lg mx-auto w-full">
 
-          {/* New ticket form */}
           {showNewForm && (
             <div className="m-4 bg-white rounded-2xl border border-green-200 p-4 shadow-sm space-y-3">
               <p className="text-sm font-bold text-green-800">New Support Ticket</p>
@@ -198,7 +190,9 @@ export default function ChatPage() {
                   {LIBRARIES.map(lib => (
                     <button key={lib.id} onClick={() => setNewLibrary(lib.id)}
                       className={`p-2.5 rounded-xl border-2 text-xs font-semibold text-left transition
-                        ${newLibrary === lib.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                        ${newLibrary === lib.id
+                          ? 'border-green-600 bg-green-50 text-green-700'
+                          : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
                       {lib.label}
                     </button>
                   ))}
@@ -211,7 +205,9 @@ export default function ChatPage() {
                   {MSG_TYPES.map(t => (
                     <button key={t.id} onClick={() => setNewMsgType(t.id)}
                       className={`p-2 rounded-xl border-2 text-center text-xs font-semibold transition
-                        ${newMsgType === t.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                        ${newMsgType === t.id
+                          ? 'border-green-600 bg-green-50 text-green-700'
+                          : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
                       <span className="block text-base">{t.label.split(' ')[0]}</span>
                       {t.label.split(' ')[1]}
                     </button>
@@ -219,30 +215,27 @@ export default function ChatPage() {
                 </div>
               </div>
 
-              <textarea
-                value={newText}
-                onChange={e => setNewText(e.target.value)}
-                rows={3}
+              <textarea value={newText} onChange={e => setNewText(e.target.value)} rows={3}
                 placeholder="Describe your inquiry, feedback, or complaint…"
                 className="w-full border border-green-200 rounded-xl px-3 py-2 text-sm
-                  focus:outline-none focus:ring-2 focus:ring-green-500 resize-none bg-green-50"
-              />
+                  focus:outline-none focus:ring-2 focus:ring-green-500 resize-none bg-green-50"/>
 
               <div className="flex gap-2">
                 <button onClick={() => { setShowNewForm(false); setNewText(''); setNewMsgType(null); setNewLibrary(null) }}
-                  className="flex-1 border-2 border-gray-200 text-gray-600 text-xs font-semibold py-2 rounded-xl hover:bg-gray-50 transition">
+                  className="flex-1 border-2 border-gray-200 text-gray-600 text-xs font-semibold
+                    py-2 rounded-xl hover:bg-gray-50 transition">
                   Cancel
                 </button>
                 <button onClick={handleCreateTicket}
                   disabled={startingNew || !newText.trim() || !newMsgType || !newLibrary}
-                  className="flex-1 bg-green-700 text-white text-xs font-semibold py-2 rounded-xl hover:bg-green-800 transition disabled:opacity-50">
+                  className="flex-1 bg-green-700 text-white text-xs font-semibold py-2 rounded-xl
+                    hover:bg-green-800 transition disabled:opacity-50">
                   {startingNew ? 'Sending…' : '✔ Submit Ticket'}
                 </button>
               </div>
             </div>
           )}
 
-          {/* Ticket list */}
           {threadsLoading ? (
             <Spinner/>
           ) : threads.length === 0 && !showNewForm ? (
@@ -254,18 +247,16 @@ export default function ChatPage() {
           ) : (
             <div className="divide-y divide-green-50">
               {threads.map(t => {
-                const lib     = LIBRARIES.find(l => l.id === t.library)
+                const lib      = LIBRARIES.find(l => l.id === t.library)
                 const resolved = t.threadStatus === 'RESOLVED'
                 return (
                   <button key={t.threadId}
                     onClick={() => { setActiveThreadId(t.threadId); setShowNewForm(false) }}
                     className="w-full text-left px-4 py-4 hover:bg-green-50 transition flex gap-3 items-start">
-                    {/* Icon */}
-                    <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center text-white text-sm font-bold
-                      ${resolved ? 'bg-gray-400' : 'bg-green-600'}`}>
+                    <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center
+                      text-white text-sm font-bold ${resolved ? 'bg-gray-400' : 'bg-green-600'}`}>
                       {t.messageType === 'COMPLAINT' ? '⚠' : t.messageType === 'FEEDBACK' ? '💬' : '🔍'}
                     </div>
-
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-1.5 flex-wrap">
@@ -281,7 +272,6 @@ export default function ChatPage() {
                       <p className="text-xs text-green-700 mt-0.5 font-medium">{lib?.label || t.library}</p>
                       <p className="text-xs text-gray-500 mt-0.5 truncate">{t.lastMessage}</p>
                     </div>
-
                     {t.unreadCount > 0 && (
                       <span className="flex-shrink-0 w-5 h-5 bg-red-500 text-white text-[10px]
                         font-bold rounded-full flex items-center justify-center">
@@ -296,7 +286,7 @@ export default function ChatPage() {
         </div>
       )}
 
-      {/* ── THREAD DETAIL VIEW ───────────────────────────────────────────── */}
+      {/* ── Thread detail ── */}
       {activeThreadId && (
         <>
           <div className="flex-1 overflow-y-auto px-4 pt-4 pb-4 max-w-lg mx-auto w-full chat-scroll">
@@ -307,19 +297,16 @@ export default function ChatPage() {
                     💡 Library staff will reply as soon as possible. Please be patient.
                   </p>
                 </div>
-
                 {messages.map(msg => (
                   <MessageBubble key={msg.id} msg={msg} isOwn={msg.senderId === userId}/>
                 ))}
-
                 {isResolved && (
                   <div className="text-center my-4 space-y-3">
                     <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full inline-block">
                       ✔ This conversation has been resolved
                     </span>
                     <div>
-                      <button
-                        onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
+                      <button onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
                         className="bg-green-700 hover:bg-green-800 text-white text-xs
                           font-semibold px-4 py-2 rounded-xl transition">
                         + Open New Ticket
@@ -327,30 +314,23 @@ export default function ChatPage() {
                     </div>
                   </div>
                 )}
-
                 <div ref={bottomRef}/>
               </>
             )}
           </div>
 
-          {/* Reply input — hidden when resolved */}
           {!isResolved && (
             <form onSubmit={e => { e.preventDefault(); e.stopPropagation() }}
               className="sticky bottom-0 w-full max-w-lg mx-auto bg-white border-t border-green-100 px-4 py-3">
               <div className="flex gap-2 items-end">
-                <textarea
-                  ref={textareaRef}
-                  value={replyText}
+                <textarea ref={textareaRef} value={replyText}
                   onChange={e => setReplyText(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  rows={1}
-                  disabled={isSending}
+                  onKeyDown={handleKeyDown} rows={1} disabled={isSending}
                   placeholder="Type a reply…"
                   className="flex-1 resize-none border border-green-200 rounded-xl px-3 py-2 text-sm
                     focus:outline-none focus:ring-2 focus:ring-green-500 max-h-28 bg-green-50
                     placeholder-gray-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ overflowY: replyText.split('\n').length > 3 ? 'auto' : 'hidden' }}
-                />
+                  style={{ overflowY: replyText.split('\n').length > 3 ? 'auto' : 'hidden' }}/>
                 <button onClick={handleReply} disabled={!canSend} type="button"
                   className="w-10 h-10 rounded-xl bg-green-700 text-white flex items-center
                     justify-center disabled:opacity-40 hover:bg-green-800 transition flex-shrink-0">

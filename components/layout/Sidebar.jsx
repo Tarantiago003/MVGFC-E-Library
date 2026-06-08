@@ -1,6 +1,7 @@
 import Link          from 'next/link'
 import { useRouter }  from 'next/router'
 import { useSession } from 'next-auth/react'
+import Logo           from '../ui/Logo'
 
 const NAV_ALL = [
   { href: '/dashboard/home',    icon: '🏠', label: 'Overview'         },
@@ -23,13 +24,11 @@ export default function Sidebar() {
   return (
     <aside className="w-56 bg-green-800 min-h-screen flex flex-col flex-shrink-0 shadow-xl">
       {/* Brand */}
-      <div className="px-5 py-6 border-b border-green-700">
+      <div className="px-5 py-5 border-b border-green-700">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-white rounded-xl flex items-center justify-center font-bold text-green-800 text-sm">
-            MV
-          </div>
+          <Logo size={9} dark={true}/>
           <div>
-            <p className="text-white font-bold text-sm leading-tight">E-Library</p>
+            <p className="text-white font-bold text-sm leading-tight">MVGFC E-Library</p>
             <p className="text-green-300 text-[10px]">
               {isAdmin ? 'Admin Panel' : 'Clerk Panel'}
             </p>

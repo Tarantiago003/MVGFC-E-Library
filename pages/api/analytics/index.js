@@ -6,11 +6,15 @@ import { rateLimiter } from '../../../middleware/rateLimiter'
 import { batchRead }   from '../../../lib/sheets'
 import { SHEETS, COL, ROLES } from '../../../lib/constants'
 
+// eslint-disable-next-line no-unused-vars
+// Analytics sheet is self-contained (name + institute written at track time)
+
 function toEvent(r) {
   return {
     id:           r[COL.ANALYTICS.ID],
     userId:       r[COL.ANALYTICS.USER_ID],
-    eventType:    r[COL.ANALYTICS.EVENT_TYPE],
+    userName:     r[COL.ANALYTICS.USER_NAME],
+    institute:    r[COL.ANALYTICS.INSTITUTE],
     resourceName: r[COL.ANALYTICS.RESOURCE_NAME],
     resourceUrl:  r[COL.ANALYTICS.RESOURCE_URL],
     timestamp:    r[COL.ANALYTICS.TIMESTAMP]
@@ -21,33 +25,16 @@ async function handler(req, res) {
   if (req.method !== 'GET')
     return res.status(405).json({ success: false, error: 'Method not allowed' })
 
-  const [events, users] = await batchRead([SHEETS.ANALYTICS, SHEETS.USERS])
+  // Analytics sheet is self-contained — no need to join users
+  const [events] = await batchRead([SHEETS.ANALYTICS])
 
-  // Build user lookup for names
-  const userMap = {}
-  for (const u of users) {
-    userMap[u[COL.USERS.ID]] = {
-      name:      u[COL.USERS.NAME],
-      email:     u[COL.USERS.EMAIL],
-      institute: u[COL.USERS.INSTITUTE] || '—',
-      userType:  u[COL.USERS.USER_TYPE]
-    }
-  }
-
-  const mapped = events.map(r => ({
-    ...toEvent(r),
-    userName:      userMap[r[COL.ANALYTICS.USER_ID]]?.name      || '—',
-    userEmail:     userMap[r[COL.ANALYTICS.USER_ID]]?.email     || '—',
-    userInstitute: userMap[r[COL.ANALYTICS.USER_ID]]?.institute || '—',
-    userType:      userMap[r[COL.ANALYTICS.USER_ID]]?.userType  || '—'
-  }))
+  const mapped = events.map(r => toEvent(r)).filter(e => e.userId)
 
   // Sort newest first
   mapped.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
 
   // Aggregate stats per resource
   const resourceStats = {}
-  const uniquePerResource = {}
   for (const e of mapped) {
     const key = e.resourceName
     if (!resourceStats[key]) {
@@ -55,14 +42,12 @@ async function handler(req, res) {
     }
     resourceStats[key].clicks++
     resourceStats[key].uniqueUsers.add(e.userId)
-    if (!uniquePerResource[key]) uniquePerResource[key] = new Set()
-    uniquePerResource[key].add(e.userId)
   }
 
   const resources = Object.values(resourceStats).map(r => ({
-    name:         r.name,
-    url:          r.url,
-    clicks:       r.clicks,
+    name:           r.name,
+    url:            r.url,
+    clicks:         r.clicks,
     uniqueVisitors: r.uniqueUsers.size
   }))
 
@@ -81,7 +66,7 @@ async function handler(req, res) {
   // Institute breakdown
   const instituteMap = {}
   for (const e of mapped) {
-    const inst = e.userInstitute || '—'
+    const inst = e.institute || '—'
     instituteMap[inst] = (instituteMap[inst] || 0) + 1
   }
   const byInstitute = Object.entries(instituteMap)
@@ -98,7 +83,7 @@ async function handler(req, res) {
       resources,
       byInstitute,
       daily,
-      recent: mapped.slice(0, 50)   // last 50 events with user info
+      recent: mapped.slice(0, 100)
     }
   })
 }

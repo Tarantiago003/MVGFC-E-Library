@@ -1,21 +1,25 @@
-
-
 import { signOut, useSession } from 'next-auth/react'
 import { useState }            from 'react'
 import { useDashboardStats }   from '../../hooks/useDashboardStats'
+import Logo                    from '../ui/Logo'
 
 export default function DashboardTopBar({ title }) {
   const { data: session } = useSession()
   const { pending, openChats } = useDashboardStats()
   const [menuOpen, setMenuOpen] = useState(false)
-  
+
   const isClerk = session?.user?.role === 'clerk'
   const assignedLibrary = session?.user?.assignedLibrary
   const libraryName = assignedLibrary === 'HIGH_SCHOOL' ? '🏫 High School' : '🏛️ Main Library'
 
   return (
     <header className="bg-white border-b border-green-100 px-6 py-3 flex items-center gap-4 sticky top-0 z-20 shadow-sm">
-      <h1 className="flex-1 text-green-800 font-bold text-lg">
+      {/* Logo visible on mobile when sidebar is hidden */}
+      <div className="lg:hidden flex-shrink-0">
+        <Logo size={8} dark={false}/>
+      </div>
+
+      <h1 className="flex-1 text-green-800 font-bold text-lg truncate">
         {title}
         {isClerk && (
           <span className="ml-3 text-xs font-normal bg-green-100 text-green-700 px-2 py-1 rounded-full">
@@ -31,7 +35,7 @@ export default function DashboardTopBar({ title }) {
         </span>
       )}
       {openChats > 0 && (
-        <span className="bg-blue-100 text-blue-700 text-xs font-semibold px-3 py-1 rounded-full">
+        <span className="bg-green-100 text-green-700 text-xs font-semibold px-3 py-1 rounded-full">
           💬 {openChats} open chats
         </span>
       )}

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
 import { INSTITUTES } from '../../lib/constants'
+import Logo from '../../components/ui/Logo'
 
 export default function RegisterPage() {
   const router = useRouter()
@@ -12,9 +13,7 @@ export default function RegisterPage() {
   const [formData, setFormData] = useState({
     name: '', email: '', password: '', confirmPassword: '',
     institute: '',
-    // Student
     studentId: '', year: '', section: '',
-    // Employee
     employeeNum: '', position: '', office: ''
   })
 
@@ -24,7 +23,6 @@ export default function RegisterPage() {
   const handleSubmit = async e => {
     e.preventDefault()
     setError('')
-
     if (formData.password !== formData.confirmPassword) { setError('Passwords do not match'); return }
     if (formData.password.length < 6) { setError('Password must be at least 6 characters'); return }
     if (!formData.institute) { setError('Please select your institute'); return }
@@ -32,23 +30,18 @@ export default function RegisterPage() {
     setLoading(true)
     try {
       const payload = {
-        name:      formData.name,
-        email:     formData.email,
-        password:  formData.password,
-        institute: formData.institute,
-        userType,
+        name: formData.name, email: formData.email,
+        password: formData.password, institute: formData.institute, userType,
         ...(userType === 'student'
           ? { studentId: formData.studentId, year: formData.year, section: formData.section }
           : { employeeNum: formData.employeeNum, position: formData.position, office: formData.office })
       }
-
       const res  = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       })
       const data = await res.json()
-
       if (data.success) {
         alert('Registration successful! Please sign in.')
         router.push('/auth/signin')
@@ -66,9 +59,10 @@ export default function RegisterPage() {
 
   return (
     <div className="min-h-screen bg-green-800 flex flex-col items-center justify-center px-6 py-12">
+      {/* Logo + wordmark */}
       <div className="flex flex-col items-center mb-8">
-        <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center shadow-xl mb-4">
-          <span className="text-4xl">📚</span>
+        <div className="w-24 h-24 rounded-2xl bg-white flex items-center justify-center shadow-xl mb-4 p-2">
+          <Logo size={16} dark={false}/>
         </div>
         <h1 className="text-white text-2xl font-bold tracking-wide">Create Account</h1>
         <p className="text-green-200 text-sm mt-1">MVGFC E-Library System</p>
@@ -94,7 +88,9 @@ export default function RegisterPage() {
               {[['student','🎓 Student'],['employee','💼 Employee']].map(([val,lbl]) => (
                 <button key={val} type="button" onClick={() => setUserType(val)}
                   className={`py-3 px-4 rounded-xl border-2 font-semibold text-sm transition
-                    ${userType === val ? 'border-green-600 bg-green-50 text-green-800' : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'}`}>
+                    ${userType === val
+                      ? 'border-green-600 bg-green-50 text-green-800'
+                      : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'}`}>
                   {lbl}
                 </button>
               ))}
@@ -121,7 +117,7 @@ export default function RegisterPage() {
             <p className="text-xs text-gray-400 mt-1">Use your official school email for notifications</p>
           </div>
 
-          {/* ── INSTITUTE (shared for both types) ── */}
+          {/* Institute */}
           <div>
             <label className="block text-sm font-semibold text-green-800 mb-1.5">
               Institute <span className="text-red-500">*</span>
@@ -129,9 +125,7 @@ export default function RegisterPage() {
             <select name="institute" value={formData.institute} onChange={handleChange}
               required className={inputCls}>
               <option value="">Select institute…</option>
-              {INSTITUTES.map(i => (
-                <option key={i} value={i}>{i}</option>
-              ))}
+              {INSTITUTES.map(i => <option key={i} value={i}>{i}</option>)}
             </select>
           </div>
 
@@ -145,7 +139,6 @@ export default function RegisterPage() {
                 <input type="text" name="studentId" value={formData.studentId} onChange={handleChange}
                   required className={inputCls} placeholder="2024-12345"/>
               </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-semibold text-green-800 mb-1.5">
@@ -215,7 +208,8 @@ export default function RegisterPage() {
           </div>
 
           <button onClick={handleSubmit} disabled={loading}
-            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold py-3 px-4 rounded-2xl transition-all disabled:opacity-60 mt-2">
+            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold
+              py-3 px-4 rounded-2xl transition-all disabled:opacity-60 mt-2">
             {loading ? 'Creating Account…' : '✓ Create Account'}
           </button>
         </div>
@@ -231,7 +225,7 @@ export default function RegisterPage() {
       </div>
 
       <p className="text-green-300 text-xs mt-8">
-        © {new Date().getFullYear()} MVGFC · All rights reserved
+        © {new Date().getFullYear()} Manuel V. Gallego Foundation Colleges · All rights reserved
       </p>
     </div>
   )

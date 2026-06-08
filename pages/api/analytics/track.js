@@ -4,11 +4,10 @@ import { compose }     from '../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
 import { withAuth }    from '../../../middleware/withAuth'
 import { rateLimiter } from '../../../middleware/rateLimiter'
-import { appendRow }   from '../../../lib/sheets'
-import { SHEETS, COL, EVENT_TYPE } from '../../../lib/constants'
+import { appendRow, readSheet } from '../../../lib/sheets'
+import { SHEETS, COL } from '../../../lib/constants'
 
 const schema = Joi.object({
-  eventType:    Joi.string().valid(...Object.values(EVENT_TYPE)).required(),
   resourceName: Joi.string().max(200).required(),
   resourceUrl:  Joi.string().uri().max(500).required()
 })
@@ -20,13 +19,19 @@ async function handler(req, res) {
   const { error, value } = schema.validate(req.body)
   if (error) httpError(400, error.details[0].message)
 
+  // Fetch institute from users sheet at track time so sheet is self-contained
+  const users   = await readSheet(SHEETS.USERS)
+  const userRow = users.find(r => r[COL.USERS.ID] === req.user.id)
+  const institute = userRow?.[COL.USERS.INSTITUTE] || '—'
+
   const id        = uuid()
   const timestamp = new Date().toISOString()
 
   await appendRow(SHEETS.ANALYTICS, [
     id,
     req.user.id,
-    value.eventType,
+    req.user.name,      // UserName — readable in Sheets without a JOIN
+    institute,          // Institute — for easy filtering in Sheets
     value.resourceName,
     value.resourceUrl,
     timestamp
