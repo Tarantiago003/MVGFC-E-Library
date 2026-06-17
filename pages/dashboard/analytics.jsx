@@ -14,7 +14,6 @@ function fmtTime(iso) {
   })
 }
 
-// Green-themed bar row
 function BarRow({ label, value, max, shade = '600' }) {
   const pct = max > 0 ? Math.round((value / max) * 100) : 0
   return (
@@ -24,7 +23,8 @@ function BarRow({ label, value, max, shade = '600' }) {
         <span className="font-bold text-green-800">{value}</span>
       </div>
       <div className="w-full bg-green-100 rounded-full h-2.5">
-        <div className={`h-2.5 rounded-full bg-green-${shade} transition-all`} style={{ width: `${pct}%` }}/>
+        <div className={`h-2.5 rounded-full bg-green-${shade} transition-all`}
+          style={{ width: `${pct}%` }}/>
       </div>
     </div>
   )
@@ -44,7 +44,6 @@ function MiniSparkline({ daily }) {
   )
 }
 
-// Distinct green shades for each resource bar
 const SHADES = ['800', '700', '600', '500']
 
 export default function AnalyticsPage() {
@@ -53,7 +52,6 @@ export default function AnalyticsPage() {
   if (isLoading) return (
     <DashboardLayout title="📊 Traffic Analytics"><Spinner/></DashboardLayout>
   )
-
   if (!data) return (
     <DashboardLayout title="📊 Traffic Analytics">
       <EmptyState icon="📊" title="No analytics data yet"
@@ -61,20 +59,24 @@ export default function AnalyticsPage() {
     </DashboardLayout>
   )
 
-  const { totalClicks, uniqueVisitors, resources = [], byInstitute = [], daily = [], recent = [] } = data
+  const {
+    totalClicks, uniqueVisitors,
+    resources = [], byInstitute = [], daily = [], recent = []
+  } = data
+
   const maxClicks = Math.max(...resources.map(r => r.clicks), 1)
   const maxInst   = Math.max(...byInstitute.map(i => i.clicks), 1)
 
   return (
     <DashboardLayout title="📊 Traffic Analytics">
 
-      {/* Summary strip — all green */}
+      {/* Summary cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         {[
-          { label: 'Total Clicks',      value: totalClicks,     icon: '🖱️', color: 'text-green-800 bg-green-50  border-green-200' },
-          { label: 'Unique Visitors',   value: uniqueVisitors,  icon: '👤', color: 'text-green-700 bg-green-50  border-green-300' },
-          { label: 'Resources Tracked', value: resources.length,icon: '🔗', color: 'text-green-700 bg-green-100 border-green-300' },
-          { label: 'Days Recorded',     value: daily.length,    icon: '📅', color: 'text-green-700 bg-green-100 border-green-300' },
+          { label: 'Total Clicks',      value: totalClicks,      icon: '🖱️', color: 'text-green-800 bg-green-50  border-green-200' },
+          { label: 'Unique Visitors',   value: uniqueVisitors,   icon: '👤', color: 'text-green-700 bg-green-50  border-green-300' },
+          { label: 'Resources Tracked', value: resources.length, icon: '🔗', color: 'text-green-700 bg-green-100 border-green-300' },
+          { label: 'Days Recorded',     value: daily.length,     icon: '📅', color: 'text-green-700 bg-green-100 border-green-300' },
         ].map(s => (
           <div key={s.label} className={`border rounded-2xl p-5 shadow-sm ${s.color}`}>
             <div className="flex items-start justify-between">
@@ -90,7 +92,7 @@ export default function AnalyticsPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
 
-        {/* Resource breakdown */}
+        {/* Clicks by resource */}
         <div className="lg:col-span-2 bg-white rounded-2xl border border-green-100 shadow-sm p-5">
           <h3 className="font-bold text-green-800 mb-4">🔗 Clicks by Resource</h3>
           {resources.length === 0
@@ -119,7 +121,7 @@ export default function AnalyticsPage() {
           }
         </div>
 
-        {/* Institute breakdown */}
+        {/* Clicks by institute */}
         <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-5">
           <h3 className="font-bold text-green-800 mb-4">🏛️ Clicks by Institute</h3>
           {byInstitute.length === 0
@@ -153,25 +155,26 @@ export default function AnalyticsPage() {
           <span>💡</span> Track specific resources on mvgallegolibrary.com
         </h3>
         <p className="text-xs text-gray-600 mb-3">
-          To track which specific database, file, or journal a user clicks inside the external site,
-          wrap those links on <strong>mvgallegolibrary.com</strong> with your e-library redirect URL:
+          Wrap individual database / file links on <strong>mvgallegolibrary.com</strong> with
+          your e-library redirect URL to capture every click with the user's name, ID, and institute:
         </p>
-        <div className="bg-white border border-green-200 rounded-xl px-4 py-3 font-mono text-xs text-green-900 break-all select-all">
+        <div className="bg-white border border-green-200 rounded-xl px-4 py-3 font-mono
+          text-xs text-green-900 break-all select-all">
           {`/api/analytics/redirect?name=EBSCO&url=https://search.ebscohost.com/...`}
         </div>
         <p className="text-[11px] text-gray-500 mt-2">
           Replace <code className="bg-green-100 px-1 rounded">EBSCO</code> with any label and
           <code className="bg-green-100 px-1 rounded ml-1">url</code> with the destination.
-          Every click will be logged with the user's name and institute automatically.
         </p>
       </div>
 
-      {/* Recent activity log */}
+      {/* Recent activity log — now includes School ID */}
       <div className="bg-white rounded-2xl border border-green-100 shadow-sm overflow-hidden">
         <div className="px-5 py-3 border-b border-green-50 flex items-center justify-between">
           <h3 className="font-bold text-green-800">🕐 Recent Activity</h3>
           <span className="text-xs text-gray-400">{recent.length} latest events</span>
         </div>
+
         {recent.length === 0
           ? <div className="py-10 text-center text-gray-400 text-sm">No activity yet.</div>
           : (
@@ -179,8 +182,10 @@ export default function AnalyticsPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-green-50 border-b border-green-100">
-                    {['User', 'Institute', 'Resource Accessed', 'Time'].map(h => (
-                      <th key={h} className="text-left px-4 py-2.5 text-xs font-bold text-green-700 uppercase tracking-wide whitespace-nowrap">
+                    {['User', 'School ID', 'Institute', 'Resource Accessed', 'Time'].map(h => (
+                      <th key={h}
+                        className="text-left px-4 py-2.5 text-xs font-bold text-green-700
+                          uppercase tracking-wide whitespace-nowrap">
                         {h}
                       </th>
                     ))}
@@ -189,22 +194,39 @@ export default function AnalyticsPage() {
                 <tbody className="divide-y divide-green-50">
                   {recent.map(e => (
                     <tr key={e.id} className="hover:bg-green-50/40 transition">
+
+                      {/* User */}
                       <td className="px-4 py-3">
                         <p className="font-semibold text-sm text-gray-800">{e.userName}</p>
                       </td>
+
+                      {/* School ID — Student ID or Employee Number */}
                       <td className="px-4 py-3">
-                        <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-semibold">
+                        <span className="font-mono text-xs text-gray-700 bg-green-50
+                          border border-green-200 px-2 py-0.5 rounded-lg">
+                          {e.schoolId || '—'}
+                        </span>
+                      </td>
+
+                      {/* Institute */}
+                      <td className="px-4 py-3">
+                        <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5
+                          rounded-full font-semibold">
                           {e.institute}
                         </span>
                       </td>
+
+                      {/* Resource */}
                       <td className="px-4 py-3">
                         <p className="text-xs font-medium text-gray-700">{e.resourceName}</p>
-                        <p className="text-[10px] text-green-600 hover:underline truncate max-w-[240px]">
-                          <a href={e.resourceUrl} target="_blank" rel="noopener noreferrer">
-                            {e.resourceUrl}
-                          </a>
-                        </p>
+                        <a href={e.resourceUrl} target="_blank" rel="noopener noreferrer"
+                          className="text-[10px] text-green-600 hover:underline truncate
+                            block max-w-[200px]">
+                          {e.resourceUrl}
+                        </a>
                       </td>
+
+                      {/* Time */}
                       <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
                         {fmtTime(e.timestamp)}
                       </td>

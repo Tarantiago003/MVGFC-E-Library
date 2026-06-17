@@ -4,14 +4,7 @@
  * Usage (any link in the app or on mvgallegolibrary.com):
  *   /api/analytics/redirect?name=EBSCO&url=https://www.ebsco.com/...
  *
- * The endpoint:
- *  1. Requires the user to be signed in
- *  2. Logs the click (name, url, user, institute) to the Analytics sheet
- *  3. Redirects the browser to the target URL
- *
- * On mvgallegolibrary.com pages, wrap specific resource links like:
- *   href="https://elibrary.mvgfc.edu.ph/api/analytics/redirect?name=EBSCO&url=https://search.ebscohost.com"
- * so every click is tracked even when users navigate from the external site.
+ * Logs the click (name, url, user, schoolId, institute) then redirects.
  */
 import { v4 as uuid }  from 'uuid'
 import { compose }     from '../../../lib/compose'
@@ -21,7 +14,6 @@ import { rateLimiter } from '../../../middleware/rateLimiter'
 import { appendRow, readSheet } from '../../../lib/sheets'
 import { SHEETS, COL } from '../../../lib/constants'
 
-// Allowed domains — add any database/journal domain you want to track
 const ALLOWED_HOSTS = [
   'mvgallegolibrary.com',
   'www.mvgallegolibrary.com',
@@ -55,17 +47,18 @@ async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' })
 
   const { name, url } = req.query
+  if (!name || !url)   httpError(400, 'Missing name or url query parameters')
+  if (!isSafeUrl(url)) httpError(400, 'Target URL is not on the allowed list')
 
-  if (!name || !url)
-    httpError(400, 'Missing name or url query parameters')
+  // Fetch user row for institute + school ID
+  const users   = await readSheet(SHEETS.USERS)
+  const userRow = users.find(r => r[COL.USERS.ID] === req.user.id)
 
-  if (!isSafeUrl(url))
-    httpError(400, 'Target URL is not on the allowed list')
-
-  // Fetch institute
-  const users     = await readSheet(SHEETS.USERS)
-  const userRow   = users.find(r => r[COL.USERS.ID] === req.user.id)
   const institute = userRow?.[COL.USERS.INSTITUTE] || '—'
+  const userType  = userRow?.[COL.USERS.USER_TYPE]
+  const schoolId  = userType === 'student'
+    ? (userRow?.[COL.USERS.STUDENT_ID]   || '—')
+    : (userRow?.[COL.USERS.EMPLOYEE_NUM] || '—')
 
   const id        = uuid()
   const timestamp = new Date().toISOString()
@@ -74,13 +67,13 @@ async function handler(req, res) {
     id,
     req.user.id,
     req.user.name,
+    schoolId,                       // SchoolID ← new column
     institute,
     decodeURIComponent(name),
     decodeURIComponent(url),
     timestamp
   ])
 
-  // Redirect to the actual resource
   res.redirect(302, decodeURIComponent(url))
 }
 

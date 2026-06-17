@@ -19,10 +19,16 @@ async function handler(req, res) {
   const { error, value } = schema.validate(req.body)
   if (error) httpError(400, error.details[0].message)
 
-  // Fetch institute from users sheet at track time so sheet is self-contained
+  // Fetch user row to get institute + school ID
   const users   = await readSheet(SHEETS.USERS)
   const userRow = users.find(r => r[COL.USERS.ID] === req.user.id)
+
   const institute = userRow?.[COL.USERS.INSTITUTE] || '—'
+  const userType  = userRow?.[COL.USERS.USER_TYPE]
+  // Student → Student ID,  Employee → Employee Number
+  const schoolId  = userType === 'student'
+    ? (userRow?.[COL.USERS.STUDENT_ID]  || '—')
+    : (userRow?.[COL.USERS.EMPLOYEE_NUM] || '—')
 
   const id        = uuid()
   const timestamp = new Date().toISOString()
@@ -30,8 +36,9 @@ async function handler(req, res) {
   await appendRow(SHEETS.ANALYTICS, [
     id,
     req.user.id,
-    req.user.name,      // UserName — readable in Sheets without a JOIN
-    institute,          // Institute — for easy filtering in Sheets
+    req.user.name,   // UserName
+    schoolId,        // SchoolID  ← new column
+    institute,       // Institute
     value.resourceName,
     value.resourceUrl,
     timestamp

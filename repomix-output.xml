@@ -65,6 +65,7 @@ components/layout/Sidebar.jsx
 components/layout/TopBar.jsx
 components/ui/Avatar.jsx
 components/ui/EmptyState.jsx
+components/ui/Logo.jsx
 components/ui/Modal.jsx
 components/ui/Spinner.jsx
 components/ui/StatCard.jsx
@@ -147,6 +148,7 @@ postcss.config.js
 public/favicon.ico
 public/library-notice-template.png
 public/manifest.json
+public/mvgfc-logo.png
 public/overdue-highschool.html
 public/overdue-highschool.png
 public/overdue-main.html
@@ -159,96 +161,6 @@ tsconfig.json
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="pages/api/analytics/redirect.js">
-/**
- * Tracked redirect endpoint.
- *
- * Usage (any link in the app or on mvgallegolibrary.com):
- *   /api/analytics/redirect?name=EBSCO&url=https://www.ebsco.com/...
- *
- * The endpoint:
- *  1. Requires the user to be signed in
- *  2. Logs the click (name, url, user, institute) to the Analytics sheet
- *  3. Redirects the browser to the target URL
- *
- * On mvgallegolibrary.com pages, wrap specific resource links like:
- *   href="https://elibrary.mvgfc.edu.ph/api/analytics/redirect?name=EBSCO&url=https://search.ebscohost.com"
- * so every click is tracked even when users navigate from the external site.
- */
-import { v4 as uuid }  from 'uuid'
-import { compose }     from '../../../lib/compose'
-import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
-import { withAuth }    from '../../../middleware/withAuth'
-import { rateLimiter } from '../../../middleware/rateLimiter'
-import { appendRow, readSheet } from '../../../lib/sheets'
-import { SHEETS, COL } from '../../../lib/constants'
-
-// Allowed domains — add any database/journal domain you want to track
-const ALLOWED_HOSTS = [
-  'mvgallegolibrary.com',
-  'www.mvgallegolibrary.com',
-  'search.ebscohost.com',
-  'proquest.com',
-  'www.proquest.com',
-  'doaj.org',
-  'www.doaj.org',
-  'pubmed.ncbi.nlm.nih.gov',
-  'scholar.google.com',
-  'jstor.org',
-  'www.jstor.org',
-  'sciencedirect.com',
-  'www.sciencedirect.com',
-  'researchgate.net',
-  'www.researchgate.net',
-  'eric.ed.gov',
-  'semanticscholar.org',
-]
-
-function isSafeUrl(raw) {
-  try {
-    const u = new URL(raw)
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
-    return ALLOWED_HOSTS.some(h => u.hostname === h || u.hostname.endsWith('.' + h))
-  } catch { return false }
-}
-
-async function handler(req, res) {
-  if (req.method !== 'GET')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  const { name, url } = req.query
-
-  if (!name || !url)
-    httpError(400, 'Missing name or url query parameters')
-
-  if (!isSafeUrl(url))
-    httpError(400, 'Target URL is not on the allowed list')
-
-  // Fetch institute
-  const users     = await readSheet(SHEETS.USERS)
-  const userRow   = users.find(r => r[COL.USERS.ID] === req.user.id)
-  const institute = userRow?.[COL.USERS.INSTITUTE] || '—'
-
-  const id        = uuid()
-  const timestamp = new Date().toISOString()
-
-  await appendRow(SHEETS.ANALYTICS, [
-    id,
-    req.user.id,
-    req.user.name,
-    institute,
-    decodeURIComponent(name),
-    decodeURIComponent(url),
-    timestamp
-  ])
-
-  // Redirect to the actual resource
-  res.redirect(302, decodeURIComponent(url))
-}
-
-export default compose(withErrorHandler, rateLimiter(300), withAuth)(handler)
-</file>
 
 <file path="components/borrow/LibraryCard.jsx">
 export default function LibraryCard({ id, name, description, icon, selected, onClick }) {
@@ -837,115 +749,6 @@ export default function DashboardLayout({ title, children }) {
 }
 </file>
 
-<file path="components/layout/DashboardTopBar.jsx">
-import { signOut, useSession } from 'next-auth/react'
-import { useState }            from 'react'
-import { useDashboardStats }   from '../../hooks/useDashboardStats'
-
-export default function DashboardTopBar({ title }) {
-  const { data: session } = useSession()
-  const { pending, openChats } = useDashboardStats()
-  const [menuOpen, setMenuOpen] = useState(false)
-  
-  const isClerk = session?.user?.role === 'clerk'
-  const assignedLibrary = session?.user?.assignedLibrary
-  const libraryName = assignedLibrary === 'HIGH_SCHOOL' ? '🏫 High School' : '🏛️ Main Library'
-
-  return (
-    <header className="bg-white border-b border-green-100 px-6 py-3 flex items-center gap-4 sticky top-0 z-20 shadow-sm">
-      <h1 className="flex-1 text-green-800 font-bold text-lg">
-        {title}
-        {isClerk && (
-          <span className="ml-3 text-xs font-normal bg-green-100 text-green-700 px-2 py-1 rounded-full">
-            {libraryName}
-          </span>
-        )}
-      </h1>
-
-      {/* Live alert badges */}
-      {pending > 0 && (
-        <span className="bg-yellow-100 text-yellow-800 text-xs font-semibold px-3 py-1 rounded-full">
-          ⏳ {pending} pending
-        </span>
-      )}
-      {openChats > 0 && (
-        <span className="bg-blue-100 text-blue-700 text-xs font-semibold px-3 py-1 rounded-full">
-          💬 {openChats} open chats
-        </span>
-      )}
-
-      {/* User menu */}
-      <div className="relative">
-        <button onClick={() => setMenuOpen(o => !o)}
-          className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-green-50 transition">
-          <div className="w-8 h-8 rounded-full bg-green-700 text-white flex items-center justify-center text-xs font-bold">
-            {session?.user?.name?.charAt(0) || '?'}
-          </div>
-          <span className="text-sm font-medium text-gray-700 hidden sm:block">
-            {session?.user?.name?.split(' ')[0]}
-          </span>
-          <span className="text-gray-400 text-xs">▾</span>
-        </button>
-
-        {menuOpen && (
-          <div className="absolute right-0 top-12 w-48 bg-white border border-green-100 rounded-xl shadow-lg py-1 z-30">
-            <div className="px-4 py-2 border-b border-green-50">
-              <p className="text-xs font-semibold text-gray-700 truncate">{session?.user?.email}</p>
-              <p className="text-[10px] text-green-600 capitalize">{session?.user?.role}</p>
-            </div>
-            <button onClick={() => signOut({ callbackUrl: '/auth/signin' })}
-              className="w-full text-left px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 transition font-medium">
-              ↩ Sign Out
-            </button>
-          </div>
-        )}
-      </div>
-    </header>
-  )
-}
-</file>
-
-<file path="components/layout/TopBar.jsx">
-import { useRouter }          from 'next/router'
-import { useNotifications }   from '../../hooks/useNotifications'
-
-export default function TopBar({ title, back }) {
-  const router = useRouter()
-  const { unread } = useNotifications()
-
-  return (
-    <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30 safe-top">
-      {back && (
-        <button onClick={() => router.back()}
-          className="p-1 rounded-full hover:bg-green-700 transition">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5}
-            viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/></svg>
-        </button>
-      )}
-      {!back && (
-        <div className="w-7 h-7 rounded-full bg-green-600 flex items-center justify-center text-xs font-bold">
-          MV
-        </div>
-      )}
-      <h1 className="flex-1 font-semibold text-base tracking-wide truncate">{title}</h1>
-      <button onClick={() => router.push('/chat')}
-        className="relative p-1 rounded-full hover:bg-green-700 transition">
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}
-          viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round"
-            d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-        </svg>
-        {unread > 0 && (
-          <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs w-4 h-4 rounded-full flex items-center justify-center font-bold">
-            {unread > 9 ? '9+' : unread}
-          </span>
-        )}
-      </button>
-    </header>
-  )
-}
-</file>
-
 <file path="components/ui/Avatar.jsx">
 import { initials } from '../../lib/utils'
 
@@ -972,6 +775,44 @@ export default function EmptyState({ icon = '📭', title, subtitle }) {
       <span className="text-5xl mb-4">{icon}</span>
       <p className="font-semibold text-green-800 text-base mb-1">{title}</p>
       {subtitle && <p className="text-gray-400 text-sm">{subtitle}</p>}
+    </div>
+  )
+}
+</file>
+
+<file path="components/ui/Logo.jsx">
+import { useState } from 'react'
+
+/**
+ * MVGFC Logo — shows /public/mvgfc-logo.png if it exists,
+ * falls back to the styled "MV" monogram so nothing breaks
+ * if the image hasn't been added yet.
+ *
+ * Props:
+ *   size  — Tailwind w-/h- number (e.g. 9 → w-9 h-9). Default: 9
+ *   dark  — true = white "MV" bg for dark backgrounds (sidebar, top-bars)
+ *           false = green "MV" bg for light backgrounds (auth cards)
+ */
+export default function Logo({ size = 9, dark = true }) {
+  const [err, setErr] = useState(false)
+  const sz = `w-${size} h-${size}`
+
+  if (!err) {
+    return (
+      <img
+        src="/mvgfc-logo.png"
+        alt="MVGFC"
+        onError={() => setErr(true)}
+        className={`${sz} object-contain flex-shrink-0`}
+      />
+    )
+  }
+
+  // Fallback monogram
+  return (
+    <div className={`${sz} rounded-xl flex items-center justify-center font-bold text-sm flex-shrink-0
+      ${dark ? 'bg-white text-green-800' : 'bg-green-800 text-white'}`}>
+      MV
     </div>
   )
 }
@@ -1858,131 +1699,22 @@ export default function App({ Component, pageProps: { session, ...rest } }) {
 }
 </file>
 
-<file path="pages/_document.jsx">
-import { Html, Head, Main, NextScript } from 'next/document'
-
-export default function Document() {
-  return (
-    <Html lang="en">
-      <Head>
-        <meta name="application-name"    content="MVGFC E-Library"/>
-        <meta name="apple-mobile-web-app-capable"           content="yes"/>
-        <meta name="apple-mobile-web-app-status-bar-style"  content="default"/>
-        <meta name="apple-mobile-web-app-title"             content="E-Library"/>
-        <meta name="mobile-web-app-capable"                 content="yes"/>
-        <meta name="theme-color"                            content="#1B5E20"/>
-        <link rel="manifest"     href="/manifest.json"/>
-        <link rel="apple-touch-icon" href="/icons/icon-192.png"/>
-        <link rel="preconnect"   href="https://fonts.googleapis.com"/>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
-      </Head>
-      <body>
-        <Main/>
-        <NextScript/>
-      </body>
-    </Html>
-  )
-}
-</file>
-
-<file path="pages/api/analytics/index.js">
-import { compose }     from '../../../lib/compose'
-import { withErrorHandler } from '../../../middleware/errorHandler'
-import { withAuth }    from '../../../middleware/withAuth'
-import { withRole }    from '../../../middleware/withRole'
-import { rateLimiter } from '../../../middleware/rateLimiter'
-import { batchRead }   from '../../../lib/sheets'
-import { SHEETS, COL, ROLES } from '../../../lib/constants'
-
-// eslint-disable-next-line no-unused-vars
-// Analytics sheet is self-contained (name + institute written at track time)
-
-function toEvent(r) {
-  return {
-    id:           r[COL.ANALYTICS.ID],
-    userId:       r[COL.ANALYTICS.USER_ID],
-    userName:     r[COL.ANALYTICS.USER_NAME],
-    institute:    r[COL.ANALYTICS.INSTITUTE],
-    resourceName: r[COL.ANALYTICS.RESOURCE_NAME],
-    resourceUrl:  r[COL.ANALYTICS.RESOURCE_URL],
-    timestamp:    r[COL.ANALYTICS.TIMESTAMP]
-  }
-}
-
-async function handler(req, res) {
-  if (req.method !== 'GET')
-    return res.status(405).json({ success: false, error: 'Method not allowed' })
-
-  // Analytics sheet is self-contained — no need to join users
-  const [events] = await batchRead([SHEETS.ANALYTICS])
-
-  const mapped = events.map(r => toEvent(r)).filter(e => e.userId)
-
-  // Sort newest first
-  mapped.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-
-  // Aggregate stats per resource
-  const resourceStats = {}
-  for (const e of mapped) {
-    const key = e.resourceName
-    if (!resourceStats[key]) {
-      resourceStats[key] = { name: key, url: e.resourceUrl, clicks: 0, uniqueUsers: new Set() }
-    }
-    resourceStats[key].clicks++
-    resourceStats[key].uniqueUsers.add(e.userId)
-  }
-
-  const resources = Object.values(resourceStats).map(r => ({
-    name:           r.name,
-    url:            r.url,
-    clicks:         r.clicks,
-    uniqueVisitors: r.uniqueUsers.size
-  }))
-
-  // Daily breakdown (last 30 days)
-  const dailyMap = {}
-  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
-  for (const e of mapped) {
-    if (new Date(e.timestamp).getTime() < cutoff) continue
-    const day = e.timestamp.split('T')[0]
-    dailyMap[day] = (dailyMap[day] || 0) + 1
-  }
-  const daily = Object.entries(dailyMap)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, count]) => ({ date, count }))
-
-  // Institute breakdown
-  const instituteMap = {}
-  for (const e of mapped) {
-    const inst = e.institute || '—'
-    instituteMap[inst] = (instituteMap[inst] || 0) + 1
-  }
-  const byInstitute = Object.entries(instituteMap)
-    .sort(([, a], [, b]) => b - a)
-    .map(([institute, clicks]) => ({ institute, clicks }))
-
-  const uniqueTotal = new Set(mapped.map(e => e.userId)).size
-
-  res.json({
-    success: true,
-    data: {
-      totalClicks:    mapped.length,
-      uniqueVisitors: uniqueTotal,
-      resources,
-      byInstitute,
-      daily,
-      recent: mapped.slice(0, 100)
-    }
-  })
-}
-
-export default compose(
-  withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
-)(handler)
-</file>
-
-<file path="pages/api/analytics/track.js">
-import Joi from 'joi'
+<file path="pages/api/analytics/redirect.js">
+/**
+ * Tracked redirect endpoint.
+ *
+ * Usage (any link in the app or on mvgallegolibrary.com):
+ *   /api/analytics/redirect?name=EBSCO&url=https://www.ebsco.com/...
+ *
+ * The endpoint:
+ *  1. Requires the user to be signed in
+ *  2. Logs the click (name, url, user, institute) to the Analytics sheet
+ *  3. Redirects the browser to the target URL
+ *
+ * On mvgallegolibrary.com pages, wrap specific resource links like:
+ *   href="https://elibrary.mvgfc.edu.ph/api/analytics/redirect?name=EBSCO&url=https://search.ebscohost.com"
+ * so every click is tracked even when users navigate from the external site.
+ */
 import { v4 as uuid }  from 'uuid'
 import { compose }     from '../../../lib/compose'
 import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
@@ -1991,21 +1723,50 @@ import { rateLimiter } from '../../../middleware/rateLimiter'
 import { appendRow, readSheet } from '../../../lib/sheets'
 import { SHEETS, COL } from '../../../lib/constants'
 
-const schema = Joi.object({
-  resourceName: Joi.string().max(200).required(),
-  resourceUrl:  Joi.string().uri().max(500).required()
-})
+// Allowed domains — add any database/journal domain you want to track
+const ALLOWED_HOSTS = [
+  'mvgallegolibrary.com',
+  'www.mvgallegolibrary.com',
+  'search.ebscohost.com',
+  'proquest.com',
+  'www.proquest.com',
+  'doaj.org',
+  'www.doaj.org',
+  'pubmed.ncbi.nlm.nih.gov',
+  'scholar.google.com',
+  'jstor.org',
+  'www.jstor.org',
+  'sciencedirect.com',
+  'www.sciencedirect.com',
+  'researchgate.net',
+  'www.researchgate.net',
+  'eric.ed.gov',
+  'semanticscholar.org',
+]
+
+function isSafeUrl(raw) {
+  try {
+    const u = new URL(raw)
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
+    return ALLOWED_HOSTS.some(h => u.hostname === h || u.hostname.endsWith('.' + h))
+  } catch { return false }
+}
 
 async function handler(req, res) {
-  if (req.method !== 'POST')
+  if (req.method !== 'GET')
     return res.status(405).json({ success: false, error: 'Method not allowed' })
 
-  const { error, value } = schema.validate(req.body)
-  if (error) httpError(400, error.details[0].message)
+  const { name, url } = req.query
 
-  // Fetch institute from users sheet at track time so sheet is self-contained
-  const users   = await readSheet(SHEETS.USERS)
-  const userRow = users.find(r => r[COL.USERS.ID] === req.user.id)
+  if (!name || !url)
+    httpError(400, 'Missing name or url query parameters')
+
+  if (!isSafeUrl(url))
+    httpError(400, 'Target URL is not on the allowed list')
+
+  // Fetch institute
+  const users     = await readSheet(SHEETS.USERS)
+  const userRow   = users.find(r => r[COL.USERS.ID] === req.user.id)
   const institute = userRow?.[COL.USERS.INSTITUTE] || '—'
 
   const id        = uuid()
@@ -2014,17 +1775,18 @@ async function handler(req, res) {
   await appendRow(SHEETS.ANALYTICS, [
     id,
     req.user.id,
-    req.user.name,      // UserName — readable in Sheets without a JOIN
-    institute,          // Institute — for easy filtering in Sheets
-    value.resourceName,
-    value.resourceUrl,
+    req.user.name,
+    institute,
+    decodeURIComponent(name),
+    decodeURIComponent(url),
     timestamp
   ])
 
-  res.status(201).json({ success: true, data: { id } })
+  // Redirect to the actual resource
+  res.redirect(302, decodeURIComponent(url))
 }
 
-export default compose(withErrorHandler, rateLimiter(200), withAuth)(handler)
+export default compose(withErrorHandler, rateLimiter(300), withAuth)(handler)
 </file>
 
 <file path="pages/api/auth/[...nextauth].js">
@@ -2798,412 +2560,6 @@ async function handlerMe(req, res) {
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
 </file>
 
-<file path="pages/auth/signin.jsx">
-import { useState } from 'react'
-import { signIn, useSession } from 'next-auth/react'
-import { useRouter } from 'next/router'
-import Link from 'next/link'
-
-export default function SignIn() {
-  const { data: session } = useSession()
-  const router = useRouter()
-  
-  const [userType, setUserType] = useState('student')
-  const [identifier, setIdentifier] = useState('')
-  const [password, setPassword] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-
-  // Redirect if already logged in
-  if (session) {
-    router.replace('/dashboard')
-    return null
-  }
-
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    setError('')
-    setLoading(true)
-
-    try {
-      const result = await signIn('credentials', {
-        redirect: false,
-        userType,
-        identifier,
-        password
-      })
-
-      if (result?.error) {
-        setError('Invalid credentials. Please try again.')
-      } else {
-        router.push('/dashboard')
-      }
-    } catch (err) {
-      setError('An error occurred. Please try again.')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-green-800 flex flex-col items-center justify-center px-6">
-      {/* Logo */}
-      <div className="flex flex-col items-center mb-10">
-        <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center shadow-xl mb-4">
-          <span className="text-4xl">📚</span>
-        </div>
-        <h1 className="text-white text-2xl font-bold tracking-wide">MVGFC E-Library</h1>
-        <p className="text-green-200 text-sm mt-1">Academic Library Management System</p>
-      </div>
-
-      {/* Login Card */}
-      <div className="w-full max-w-sm bg-white rounded-3xl shadow-2xl p-8">
-        <h2 className="text-green-800 text-xl font-bold mb-1">Welcome Back</h2>
-        <p className="text-gray-500 text-sm mb-6">Sign in to access your library account</p>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl mb-4 text-sm">
-            {error}
-          </div>
-        )}
-
-        {/* User Type Toggle */}
-        <div className="mb-4">
-          <label className="block text-sm font-semibold text-green-800 mb-2">
-            I am a
-          </label>
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={() => setUserType('student')}
-              className={`py-2.5 px-4 rounded-xl border-2 font-semibold text-sm transition ${
-                userType === 'student'
-                  ? 'border-green-600 bg-green-50 text-green-800'
-                  : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'
-              }`}
-            >
-              🎓 Student
-            </button>
-            <button
-              type="button"
-              onClick={() => setUserType('employee')}
-              className={`py-2.5 px-4 rounded-xl border-2 font-semibold text-sm transition ${
-                userType === 'employee'
-                  ? 'border-green-600 bg-green-50 text-green-800'
-                  : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'
-              }`}
-            >
-              💼 Employee
-            </button>
-          </div>
-        </div>
-
-        {/* Login Form */}
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-semibold text-green-800 mb-1.5">
-              {userType === 'student' ? 'Student ID Number' : 'Employee Number'}
-            </label>
-            <input
-              type="text"
-              value={identifier}
-              onChange={(e) => setIdentifier(e.target.value)}
-              required
-              className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                focus:outline-none focus:ring-2 focus:ring-green-500"
-              placeholder={userType === 'student' ? '2024-12345' : 'EMP-12345'}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-semibold text-green-800 mb-1.5">
-              Password
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
-                focus:outline-none focus:ring-2 focus:ring-green-500"
-              placeholder="Enter your password"
-            />
-          </div>
-
-          <button
-            onClick={handleSubmit}
-            disabled={loading || !identifier || !password}
-            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold
-              py-3 px-4 rounded-2xl transition-all disabled:opacity-60"
-          >
-            {loading ? 'Signing in...' : '→ Sign In'}
-          </button>
-        </div>
-
-        <div className="mt-6 text-center">
-          <p className="text-sm text-gray-500">
-            Don't have an account?{' '}
-            <Link href="/auth/register" className="text-green-700 font-semibold hover:underline">
-              Register here
-            </Link>
-          </p>
-        </div>
-      </div>
-
-      <p className="text-green-300 text-xs mt-8">
-        © {new Date().getFullYear()} MVGFC · All rights reserved
-      </p>
-    </div>
-  )
-}
-</file>
-
-<file path="pages/dashboard/403.jsx">
-import Link from 'next/link'
-
-export default function ForbiddenPage() {
-  return (
-    <div className="min-h-screen bg-green-50 flex flex-col items-center justify-center text-center px-6">
-      <span className="text-6xl mb-6">🚫</span>
-      <h1 className="text-3xl font-bold text-green-800 mb-2">Access Denied</h1>
-      <p className="text-gray-500 text-sm max-w-sm mb-8">
-        You don't have permission to view this page. This area requires a higher privilege level.
-      </p>
-      <Link href="/dashboard/home"
-        className="bg-green-700 text-white font-semibold px-6 py-3 rounded-2xl hover:bg-green-800 transition">
-        ← Back to Dashboard
-      </Link>
-    </div>
-  )
-}
-</file>
-
-<file path="pages/dashboard/analytics.jsx">
-import useSWR            from 'swr'
-import DashboardLayout   from '../../components/layout/DashboardLayout'
-import Spinner           from '../../components/ui/Spinner'
-import EmptyState        from '../../components/ui/EmptyState'
-import { withDashboardAuth } from '../../components/guards/withDashboardAuth'
-import api               from '../../lib/api'
-
-const fetcher = url => api.get(url).then(d => d.data)
-
-function fmtTime(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleString('en-PH', {
-    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
-  })
-}
-
-// Green-themed bar row
-function BarRow({ label, value, max, shade = '600' }) {
-  const pct = max > 0 ? Math.round((value / max) * 100) : 0
-  return (
-    <div className="mb-3 last:mb-0">
-      <div className="flex justify-between text-xs mb-1">
-        <span className="font-semibold text-gray-700 truncate max-w-[70%]">{label}</span>
-        <span className="font-bold text-green-800">{value}</span>
-      </div>
-      <div className="w-full bg-green-100 rounded-full h-2.5">
-        <div className={`h-2.5 rounded-full bg-green-${shade} transition-all`} style={{ width: `${pct}%` }}/>
-      </div>
-    </div>
-  )
-}
-
-function MiniSparkline({ daily }) {
-  if (!daily?.length) return null
-  const max = Math.max(...daily.map(d => d.count), 1)
-  return (
-    <div className="flex items-end gap-0.5 h-12">
-      {daily.slice(-14).map(d => (
-        <div key={d.date} className="flex-1 bg-green-500 rounded-sm"
-          style={{ height: `${Math.max(4, (d.count / max) * 48)}px` }}
-          title={`${d.date}: ${d.count} click${d.count !== 1 ? 's' : ''}`}/>
-      ))}
-    </div>
-  )
-}
-
-// Distinct green shades for each resource bar
-const SHADES = ['800', '700', '600', '500']
-
-export default function AnalyticsPage() {
-  const { data, isLoading } = useSWR('/analytics', fetcher, { refreshInterval: 30_000 })
-
-  if (isLoading) return (
-    <DashboardLayout title="📊 Traffic Analytics"><Spinner/></DashboardLayout>
-  )
-
-  if (!data) return (
-    <DashboardLayout title="📊 Traffic Analytics">
-      <EmptyState icon="📊" title="No analytics data yet"
-        subtitle="Link clicks will appear here once users start visiting resources."/>
-    </DashboardLayout>
-  )
-
-  const { totalClicks, uniqueVisitors, resources = [], byInstitute = [], daily = [], recent = [] } = data
-  const maxClicks = Math.max(...resources.map(r => r.clicks), 1)
-  const maxInst   = Math.max(...byInstitute.map(i => i.clicks), 1)
-
-  return (
-    <DashboardLayout title="📊 Traffic Analytics">
-
-      {/* Summary strip — all green */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {[
-          { label: 'Total Clicks',      value: totalClicks,     icon: '🖱️', color: 'text-green-800 bg-green-50  border-green-200' },
-          { label: 'Unique Visitors',   value: uniqueVisitors,  icon: '👤', color: 'text-green-700 bg-green-50  border-green-300' },
-          { label: 'Resources Tracked', value: resources.length,icon: '🔗', color: 'text-green-700 bg-green-100 border-green-300' },
-          { label: 'Days Recorded',     value: daily.length,    icon: '📅', color: 'text-green-700 bg-green-100 border-green-300' },
-        ].map(s => (
-          <div key={s.label} className={`border rounded-2xl p-5 shadow-sm ${s.color}`}>
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide opacity-70">{s.label}</p>
-                <p className="text-3xl font-bold mt-1">{s.value}</p>
-              </div>
-              <span className="text-3xl opacity-80">{s.icon}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-
-        {/* Resource breakdown */}
-        <div className="lg:col-span-2 bg-white rounded-2xl border border-green-100 shadow-sm p-5">
-          <h3 className="font-bold text-green-800 mb-4">🔗 Clicks by Resource</h3>
-          {resources.length === 0
-            ? <p className="text-sm text-gray-400 text-center py-8">No resource clicks yet.</p>
-            : resources.map((r, i) => (
-                <div key={r.name} className="mb-5 last:mb-0">
-                  <div className="flex items-start justify-between gap-2 mb-1.5">
-                    <div className="min-w-0">
-                      <p className="text-sm font-semibold text-gray-800 truncate">{r.name}</p>
-                      <a href={r.url} target="_blank" rel="noopener noreferrer"
-                        className="text-[10px] text-green-600 hover:underline truncate block max-w-[280px]">
-                        {r.url}
-                      </a>
-                    </div>
-                    <div className="text-right flex-shrink-0">
-                      <p className="text-lg font-bold text-green-800">{r.clicks}</p>
-                      <p className="text-[10px] text-gray-400">{r.uniqueVisitors} unique</p>
-                    </div>
-                  </div>
-                  <div className="w-full bg-green-100 rounded-full h-2.5">
-                    <div className={`h-2.5 rounded-full bg-green-${SHADES[i % SHADES.length]}`}
-                      style={{ width: `${Math.round((r.clicks / maxClicks) * 100)}%` }}/>
-                  </div>
-                </div>
-              ))
-          }
-        </div>
-
-        {/* Institute breakdown */}
-        <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-5">
-          <h3 className="font-bold text-green-800 mb-4">🏛️ Clicks by Institute</h3>
-          {byInstitute.length === 0
-            ? <p className="text-sm text-gray-400 text-center py-8">No data yet.</p>
-            : byInstitute.map(({ institute, clicks }, i) => (
-                <BarRow key={institute} label={institute} value={clicks}
-                  max={maxInst} shade={SHADES[i % SHADES.length]}/>
-              ))
-          }
-        </div>
-      </div>
-
-      {/* Daily sparkline */}
-      {daily.length > 0 && (
-        <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-5 mb-6">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="font-bold text-green-800">📈 Daily Activity (last 14 days)</h3>
-            <span className="text-xs text-gray-400">Each bar = 1 day</span>
-          </div>
-          <MiniSparkline daily={daily}/>
-          <div className="flex justify-between text-[10px] text-gray-400 mt-1.5">
-            <span>{daily.slice(-14)[0]?.date}</span>
-            <span>Today</span>
-          </div>
-        </div>
-      )}
-
-      {/* Deep tracking tip */}
-      <div className="bg-green-50 border border-green-200 rounded-2xl p-5 mb-6">
-        <h3 className="font-bold text-green-800 mb-2 flex items-center gap-2">
-          <span>💡</span> Track specific resources on mvgallegolibrary.com
-        </h3>
-        <p className="text-xs text-gray-600 mb-3">
-          To track which specific database, file, or journal a user clicks inside the external site,
-          wrap those links on <strong>mvgallegolibrary.com</strong> with your e-library redirect URL:
-        </p>
-        <div className="bg-white border border-green-200 rounded-xl px-4 py-3 font-mono text-xs text-green-900 break-all select-all">
-          {`/api/analytics/redirect?name=EBSCO&url=https://search.ebscohost.com/...`}
-        </div>
-        <p className="text-[11px] text-gray-500 mt-2">
-          Replace <code className="bg-green-100 px-1 rounded">EBSCO</code> with any label and
-          <code className="bg-green-100 px-1 rounded ml-1">url</code> with the destination.
-          Every click will be logged with the user's name and institute automatically.
-        </p>
-      </div>
-
-      {/* Recent activity log */}
-      <div className="bg-white rounded-2xl border border-green-100 shadow-sm overflow-hidden">
-        <div className="px-5 py-3 border-b border-green-50 flex items-center justify-between">
-          <h3 className="font-bold text-green-800">🕐 Recent Activity</h3>
-          <span className="text-xs text-gray-400">{recent.length} latest events</span>
-        </div>
-        {recent.length === 0
-          ? <div className="py-10 text-center text-gray-400 text-sm">No activity yet.</div>
-          : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-green-50 border-b border-green-100">
-                    {['User', 'Institute', 'Resource Accessed', 'Time'].map(h => (
-                      <th key={h} className="text-left px-4 py-2.5 text-xs font-bold text-green-700 uppercase tracking-wide whitespace-nowrap">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-green-50">
-                  {recent.map(e => (
-                    <tr key={e.id} className="hover:bg-green-50/40 transition">
-                      <td className="px-4 py-3">
-                        <p className="font-semibold text-sm text-gray-800">{e.userName}</p>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-semibold">
-                          {e.institute}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="text-xs font-medium text-gray-700">{e.resourceName}</p>
-                        <p className="text-[10px] text-green-600 hover:underline truncate max-w-[240px]">
-                          <a href={e.resourceUrl} target="_blank" rel="noopener noreferrer">
-                            {e.resourceUrl}
-                          </a>
-                        </p>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
-                        {fmtTime(e.timestamp)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )
-        }
-      </div>
-    </DashboardLayout>
-  )
-}
-
-export const getServerSideProps = withDashboardAuth()
-</file>
-
 <file path="pages/dashboard/chat.jsx">
 import { useState, useRef } from 'react'  // ADD useRef
 import DashboardLayout        from '../../components/layout/DashboardLayout'
@@ -3748,23 +3104,6 @@ module.exports = {
     tailwindcss: {},
     autoprefixer: {}
   }
-}
-</file>
-
-<file path="public/manifest.json">
-{
-  "name": "MVGFC E-Library",
-  "short_name": "E-Library",
-  "description": "MVGFC Academic E-Library Management System",
-  "start_url": "/dashboard",
-  "display": "standalone",
-  "background_color": "#F1F8E9",
-  "theme_color": "#1B5E20",
-  "orientation": "portrait",
-  "icons": [
-    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
-  ]
 }
 </file>
 
@@ -5813,69 +5152,120 @@ export default function ThreadList({ threads, activeThread, onSelect, loading })
 }
 </file>
 
-<file path="components/layout/Sidebar.jsx">
-import Link          from 'next/link'
-import { useRouter }  from 'next/router'
-import { useSession } from 'next-auth/react'
+<file path="components/layout/DashboardTopBar.jsx">
+import { signOut, useSession } from 'next-auth/react'
+import { useState }            from 'react'
+import { useDashboardStats }   from '../../hooks/useDashboardStats'
+import Logo                    from '../ui/Logo'
 
-const NAV_ALL = [
-  { href: '/dashboard/home',    icon: '🏠', label: 'Overview'         },
-  { href: '/dashboard/borrows', icon: '📚', label: 'Borrow Requests'  },
-  { href: '/dashboard/chat',    icon: '💬', label: 'Chat Console'     },
-  { href: '/dashboard/notices', icon: '📄', label: 'Generate Notices' },
-]
-const NAV_ADMIN = [
-  { href: '/dashboard/users',     icon: '👥', label: 'User Management' },
-  { href: '/dashboard/analytics', icon: '📊', label: 'Analytics'       },
-]
-
-export default function Sidebar() {
-  const { pathname }      = useRouter()
+export default function DashboardTopBar({ title }) {
   const { data: session } = useSession()
-  const isAdmin = session?.user?.role === 'admin'
+  const { pending, openChats } = useDashboardStats()
+  const [menuOpen, setMenuOpen] = useState(false)
 
-  const links = isAdmin ? [...NAV_ALL, ...NAV_ADMIN] : NAV_ALL
+  const isClerk = session?.user?.role === 'clerk'
+  const assignedLibrary = session?.user?.assignedLibrary
+  const libraryName = assignedLibrary === 'HIGH_SCHOOL' ? '🏫 High School' : '🏛️ Main Library'
 
   return (
-    <aside className="w-56 bg-green-800 min-h-screen flex flex-col flex-shrink-0 shadow-xl">
-      {/* Brand */}
-      <div className="px-5 py-6 border-b border-green-700">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-white rounded-xl flex items-center justify-center font-bold text-green-800 text-sm">
-            MV
-          </div>
-          <div>
-            <p className="text-white font-bold text-sm leading-tight">E-Library</p>
-            <p className="text-green-300 text-[10px]">
-              {isAdmin ? 'Admin Panel' : 'Clerk Panel'}
-            </p>
-          </div>
-        </div>
+    <header className="bg-white border-b border-green-100 px-6 py-3 flex items-center gap-4 sticky top-0 z-20 shadow-sm">
+      {/* Logo visible on mobile when sidebar is hidden */}
+      <div className="lg:hidden flex-shrink-0">
+        <Logo size={8} dark={false}/>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
-        {links.map(({ href, icon, label }) => {
-          const active = pathname === href
-          return (
-            <Link key={href} href={href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all
-                ${active
-                  ? 'bg-white text-green-800 shadow-sm'
-                  : 'text-green-100 hover:bg-green-700 hover:text-white'}`}>
-              <span className="text-base w-5 text-center">{icon}</span>
-              {label}
-            </Link>
-          )
-        })}
-      </nav>
+      <h1 className="flex-1 text-green-800 font-bold text-lg truncate">
+        {title}
+        {isClerk && (
+          <span className="ml-3 text-xs font-normal bg-green-100 text-green-700 px-2 py-1 rounded-full">
+            {libraryName}
+          </span>
+        )}
+      </h1>
 
-      {/* Session info */}
-      <div className="px-4 py-4 border-t border-green-700">
-        <p className="text-green-200 text-xs font-medium truncate">{session?.user?.name}</p>
-        <p className="text-green-400 text-[10px] mt-0.5 capitalize">{session?.user?.role}</p>
+      {/* Live alert badges */}
+      {pending > 0 && (
+        <span className="bg-yellow-100 text-yellow-800 text-xs font-semibold px-3 py-1 rounded-full">
+          ⏳ {pending} pending
+        </span>
+      )}
+      {openChats > 0 && (
+        <span className="bg-green-100 text-green-700 text-xs font-semibold px-3 py-1 rounded-full">
+          💬 {openChats} open chats
+        </span>
+      )}
+
+      {/* User menu */}
+      <div className="relative">
+        <button onClick={() => setMenuOpen(o => !o)}
+          className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-green-50 transition">
+          <div className="w-8 h-8 rounded-full bg-green-700 text-white flex items-center justify-center text-xs font-bold">
+            {session?.user?.name?.charAt(0) || '?'}
+          </div>
+          <span className="text-sm font-medium text-gray-700 hidden sm:block">
+            {session?.user?.name?.split(' ')[0]}
+          </span>
+          <span className="text-gray-400 text-xs">▾</span>
+        </button>
+
+        {menuOpen && (
+          <div className="absolute right-0 top-12 w-48 bg-white border border-green-100 rounded-xl shadow-lg py-1 z-30">
+            <div className="px-4 py-2 border-b border-green-50">
+              <p className="text-xs font-semibold text-gray-700 truncate">{session?.user?.email}</p>
+              <p className="text-[10px] text-green-600 capitalize">{session?.user?.role}</p>
+            </div>
+            <button onClick={() => signOut({ callbackUrl: '/auth/signin' })}
+              className="w-full text-left px-4 py-2.5 text-sm text-red-500 hover:bg-red-50 transition font-medium">
+              ↩ Sign Out
+            </button>
+          </div>
+        )}
       </div>
-    </aside>
+    </header>
+  )
+}
+</file>
+
+<file path="components/layout/TopBar.jsx">
+import { useRouter }        from 'next/router'
+import { useNotifications } from '../../hooks/useNotifications'
+import Logo                 from '../ui/Logo'
+
+export default function TopBar({ title, back }) {
+  const router = useRouter()
+  const { unread } = useNotifications()
+
+  return (
+    <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30 safe-top">
+      {back
+        ? (
+          <button onClick={() => router.back()}
+            className="p-1 rounded-full hover:bg-green-700 transition flex-shrink-0">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5}
+              viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
+            </svg>
+          </button>
+        )
+        : <Logo size={8} dark={true}/>
+      }
+
+      <h1 className="flex-1 font-semibold text-base tracking-wide truncate">{title}</h1>
+
+      <button onClick={() => router.push('/chat')}
+        className="relative p-1 rounded-full hover:bg-green-700 transition flex-shrink-0">
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2}
+          viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round"
+            d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+        </svg>
+        {unread > 0 && (
+          <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs w-4 h-4 rounded-full flex items-center justify-center font-bold">
+            {unread > 9 ? '9+' : unread}
+          </span>
+        )}
+      </button>
+    </header>
   )
 }
 </file>
@@ -6194,6 +5584,182 @@ module.exports = withPWA({
     "typescript": "^5"
   }
 }
+</file>
+
+<file path="pages/_document.jsx">
+import { Html, Head, Main, NextScript } from 'next/document'
+
+export default function Document() {
+  return (
+    <Html lang="en">
+      <Head>
+        <meta name="application-name"                   content="MVGFC E-Library"/>
+        <meta name="apple-mobile-web-app-capable"       content="yes"/>
+        <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+        <meta name="apple-mobile-web-app-title"         content="E-Library"/>
+        <meta name="mobile-web-app-capable"             content="yes"/>
+        <meta name="theme-color"                        content="#1B5E20"/>
+
+        {/* Favicon — uses the MVGFC logo */}
+        <link rel="icon"             href="/mvgfc-logo.png"/>
+        <link rel="apple-touch-icon" href="/mvgfc-logo.png"/>
+
+        <link rel="manifest" href="/manifest.json"/>
+        <link rel="preconnect" href="https://fonts.googleapis.com"/>
+        <link
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+          rel="stylesheet"
+        />
+      </Head>
+      <body>
+        <Main/>
+        <NextScript/>
+      </body>
+    </Html>
+  )
+}
+</file>
+
+<file path="pages/api/analytics/index.js">
+import { compose }     from '../../../lib/compose'
+import { withErrorHandler } from '../../../middleware/errorHandler'
+import { withAuth }    from '../../../middleware/withAuth'
+import { withRole }    from '../../../middleware/withRole'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import { batchRead }   from '../../../lib/sheets'
+import { SHEETS, COL, ROLES } from '../../../lib/constants'
+
+// eslint-disable-next-line no-unused-vars
+// Analytics sheet is self-contained (name + institute written at track time)
+
+function toEvent(r) {
+  return {
+    id:           r[COL.ANALYTICS.ID],
+    userId:       r[COL.ANALYTICS.USER_ID],
+    userName:     r[COL.ANALYTICS.USER_NAME],
+    institute:    r[COL.ANALYTICS.INSTITUTE],
+    resourceName: r[COL.ANALYTICS.RESOURCE_NAME],
+    resourceUrl:  r[COL.ANALYTICS.RESOURCE_URL],
+    timestamp:    r[COL.ANALYTICS.TIMESTAMP]
+  }
+}
+
+async function handler(req, res) {
+  if (req.method !== 'GET')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  // Analytics sheet is self-contained — no need to join users
+  const [events] = await batchRead([SHEETS.ANALYTICS])
+
+  const mapped = events.map(r => toEvent(r)).filter(e => e.userId)
+
+  // Sort newest first
+  mapped.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+
+  // Aggregate stats per resource
+  const resourceStats = {}
+  for (const e of mapped) {
+    const key = e.resourceName
+    if (!resourceStats[key]) {
+      resourceStats[key] = { name: key, url: e.resourceUrl, clicks: 0, uniqueUsers: new Set() }
+    }
+    resourceStats[key].clicks++
+    resourceStats[key].uniqueUsers.add(e.userId)
+  }
+
+  const resources = Object.values(resourceStats).map(r => ({
+    name:           r.name,
+    url:            r.url,
+    clicks:         r.clicks,
+    uniqueVisitors: r.uniqueUsers.size
+  }))
+
+  // Daily breakdown (last 30 days)
+  const dailyMap = {}
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+  for (const e of mapped) {
+    if (new Date(e.timestamp).getTime() < cutoff) continue
+    const day = e.timestamp.split('T')[0]
+    dailyMap[day] = (dailyMap[day] || 0) + 1
+  }
+  const daily = Object.entries(dailyMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, count]) => ({ date, count }))
+
+  // Institute breakdown
+  const instituteMap = {}
+  for (const e of mapped) {
+    const inst = e.institute || '—'
+    instituteMap[inst] = (instituteMap[inst] || 0) + 1
+  }
+  const byInstitute = Object.entries(instituteMap)
+    .sort(([, a], [, b]) => b - a)
+    .map(([institute, clicks]) => ({ institute, clicks }))
+
+  const uniqueTotal = new Set(mapped.map(e => e.userId)).size
+
+  res.json({
+    success: true,
+    data: {
+      totalClicks:    mapped.length,
+      uniqueVisitors: uniqueTotal,
+      resources,
+      byInstitute,
+      daily,
+      recent: mapped.slice(0, 100)
+    }
+  })
+}
+
+export default compose(
+  withErrorHandler, rateLimiter(), withAuth, withRole(ROLES.ADMIN, ROLES.CLERK)
+)(handler)
+</file>
+
+<file path="pages/api/analytics/track.js">
+import Joi from 'joi'
+import { v4 as uuid }  from 'uuid'
+import { compose }     from '../../../lib/compose'
+import { withErrorHandler, httpError } from '../../../middleware/errorHandler'
+import { withAuth }    from '../../../middleware/withAuth'
+import { rateLimiter } from '../../../middleware/rateLimiter'
+import { appendRow, readSheet } from '../../../lib/sheets'
+import { SHEETS, COL } from '../../../lib/constants'
+
+const schema = Joi.object({
+  resourceName: Joi.string().max(200).required(),
+  resourceUrl:  Joi.string().uri().max(500).required()
+})
+
+async function handler(req, res) {
+  if (req.method !== 'POST')
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+
+  const { error, value } = schema.validate(req.body)
+  if (error) httpError(400, error.details[0].message)
+
+  // Fetch institute from users sheet at track time so sheet is self-contained
+  const users   = await readSheet(SHEETS.USERS)
+  const userRow = users.find(r => r[COL.USERS.ID] === req.user.id)
+  const institute = userRow?.[COL.USERS.INSTITUTE] || '—'
+
+  const id        = uuid()
+  const timestamp = new Date().toISOString()
+
+  await appendRow(SHEETS.ANALYTICS, [
+    id,
+    req.user.id,
+    req.user.name,      // UserName — readable in Sheets without a JOIN
+    institute,          // Institute — for easy filtering in Sheets
+    value.resourceName,
+    value.resourceUrl,
+    timestamp
+  ])
+
+  res.status(201).json({ success: true, data: { id } })
+}
+
+export default compose(withErrorHandler, rateLimiter(200), withAuth)(handler)
 </file>
 
 <file path="pages/api/auth/register.js">
@@ -6884,86 +6450,60 @@ async function handlerMe(req, res) {
 export default compose(withErrorHandler, rateLimiter(), withAuth)(handlerMe)
 </file>
 
-<file path="pages/auth/register.jsx">
+<file path="pages/auth/signin.jsx">
 import { useState } from 'react'
+import { signIn, useSession } from 'next-auth/react'
 import { useRouter } from 'next/router'
 import Link from 'next/link'
-import { INSTITUTES } from '../../lib/constants'
+import Logo from '../../components/ui/Logo'
 
-export default function RegisterPage() {
+export default function SignIn() {
+  const { data: session } = useSession()
   const router = useRouter()
-  const [userType, setUserType] = useState('student')
-  const [loading,  setLoading]  = useState(false)
-  const [error,    setError]    = useState('')
 
-  const [formData, setFormData] = useState({
-    name: '', email: '', password: '', confirmPassword: '',
-    institute: '',
-    // Student
-    studentId: '', year: '', section: '',
-    // Employee
-    employeeNum: '', position: '', office: ''
-  })
+  const [userType,    setUserType]   = useState('student')
+  const [identifier,  setIdentifier] = useState('')
+  const [password,    setPassword]   = useState('')
+  const [loading,     setLoading]    = useState(false)
+  const [error,       setError]      = useState('')
 
-  const handleChange = e =>
-    setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }))
+  if (session) {
+    router.replace('/dashboard')
+    return null
+  }
 
-  const handleSubmit = async e => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
-
-    if (formData.password !== formData.confirmPassword) { setError('Passwords do not match'); return }
-    if (formData.password.length < 6) { setError('Password must be at least 6 characters'); return }
-    if (!formData.institute) { setError('Please select your institute'); return }
-
     setLoading(true)
     try {
-      const payload = {
-        name:      formData.name,
-        email:     formData.email,
-        password:  formData.password,
-        institute: formData.institute,
-        userType,
-        ...(userType === 'student'
-          ? { studentId: formData.studentId, year: formData.year, section: formData.section }
-          : { employeeNum: formData.employeeNum, position: formData.position, office: formData.office })
-      }
-
-      const res  = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+      const result = await signIn('credentials', {
+        redirect: false, userType, identifier, password
       })
-      const data = await res.json()
-
-      if (data.success) {
-        alert('Registration successful! Please sign in.')
-        router.push('/auth/signin')
-      } else {
-        setError(data.error || 'Registration failed')
-      }
+      if (result?.error) setError('Invalid credentials. Please try again.')
+      else router.push('/dashboard')
     } catch {
-      setError('Registration failed. Please try again.')
+      setError('An error occurred. Please try again.')
     } finally {
       setLoading(false)
     }
   }
 
-  const inputCls = 'w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-green-500'
-
   return (
-    <div className="min-h-screen bg-green-800 flex flex-col items-center justify-center px-6 py-12">
-      <div className="flex flex-col items-center mb-8">
-        <div className="w-20 h-20 rounded-2xl bg-white flex items-center justify-center shadow-xl mb-4">
-          <span className="text-4xl">📚</span>
+    <div className="min-h-screen bg-green-800 flex flex-col items-center justify-center px-6">
+      {/* Logo + wordmark */}
+      <div className="flex flex-col items-center mb-10">
+        <div className="w-24 h-24 rounded-2xl bg-white flex items-center justify-center shadow-xl mb-4 p-2">
+          <Logo size={16} dark={false}/>
         </div>
-        <h1 className="text-white text-2xl font-bold tracking-wide">Create Account</h1>
-        <p className="text-green-200 text-sm mt-1">MVGFC E-Library System</p>
+        <h1 className="text-white text-2xl font-bold tracking-wide">MVGFC E-Library</h1>
+        <p className="text-green-200 text-sm mt-1">Academic Library Management System</p>
       </div>
 
-      <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-8 max-h-[85vh] overflow-y-auto">
-        <h2 className="text-green-800 text-xl font-bold mb-1">Welcome!</h2>
-        <p className="text-gray-500 text-sm mb-6">Create your library account</p>
+      {/* Login Card */}
+      <div className="w-full max-w-sm bg-white rounded-3xl shadow-2xl p-8">
+        <h2 className="text-green-800 text-xl font-bold mb-1">Welcome Back</h2>
+        <p className="text-gray-500 text-sm mb-6">Sign in to access your library account</p>
 
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl mb-4 text-sm">
@@ -6971,154 +6511,63 @@ export default function RegisterPage() {
           </div>
         )}
 
+        {/* User Type Toggle */}
+        <div className="mb-4">
+          <label className="block text-sm font-semibold text-green-800 mb-2">I am a</label>
+          <div className="grid grid-cols-2 gap-3">
+            {[['student','🎓 Student'],['employee','💼 Employee']].map(([val,lbl]) => (
+              <button key={val} type="button" onClick={() => setUserType(val)}
+                className={`py-2.5 px-4 rounded-xl border-2 font-semibold text-sm transition
+                  ${userType === val
+                    ? 'border-green-600 bg-green-50 text-green-800'
+                    : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'}`}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="space-y-4">
-          {/* User type */}
-          <div>
-            <label className="block text-sm font-semibold text-green-800 mb-2">
-              I am a <span className="text-red-500">*</span>
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              {[['student','🎓 Student'],['employee','💼 Employee']].map(([val,lbl]) => (
-                <button key={val} type="button" onClick={() => setUserType(val)}
-                  className={`py-3 px-4 rounded-xl border-2 font-semibold text-sm transition
-                    ${userType === val ? 'border-green-600 bg-green-50 text-green-800' : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'}`}>
-                  {lbl}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Full name */}
           <div>
             <label className="block text-sm font-semibold text-green-800 mb-1.5">
-              Full Name <span className="text-red-500">*</span>
+              {userType === 'student' ? 'Student ID Number' : 'Employee Number'}
             </label>
-            <input type="text" name="name" value={formData.name} onChange={handleChange}
-              required className={inputCls} placeholder="Juan Dela Cruz"/>
+            <input type="text" value={identifier}
+              onChange={e => setIdentifier(e.target.value)} required
+              className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
+                focus:outline-none focus:ring-2 focus:ring-green-500"
+              placeholder={userType === 'student' ? '2024-12345' : 'EMP-12345'}/>
           </div>
 
-          {/* Email */}
           <div>
-            <label className="block text-sm font-semibold text-green-800 mb-1.5">
-              Email Address <span className="text-red-500">*</span>
-            </label>
-            <input type="email" name="email" value={formData.email} onChange={handleChange}
-              required className={inputCls}
-              placeholder={userType === 'student' ? 'student@mvgfc.edu.ph' : 'employee@mvgfc.edu.ph'}/>
-            <p className="text-xs text-gray-400 mt-1">Use your official school email for notifications</p>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">Password</label>
+            <input type="password" value={password}
+              onChange={e => setPassword(e.target.value)} required
+              className="w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm
+                focus:outline-none focus:ring-2 focus:ring-green-500"
+              placeholder="Enter your password"/>
           </div>
 
-          {/* ── INSTITUTE (shared for both types) ── */}
-          <div>
-            <label className="block text-sm font-semibold text-green-800 mb-1.5">
-              Institute <span className="text-red-500">*</span>
-            </label>
-            <select name="institute" value={formData.institute} onChange={handleChange}
-              required className={inputCls}>
-              <option value="">Select institute…</option>
-              {INSTITUTES.map(i => (
-                <option key={i} value={i}>{i}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Student-specific */}
-          {userType === 'student' && (
-            <>
-              <div>
-                <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                  Student ID Number <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="studentId" value={formData.studentId} onChange={handleChange}
-                  required className={inputCls} placeholder="2024-12345"/>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                    Year Level <span className="text-red-500">*</span>
-                  </label>
-                  <select name="year" value={formData.year} onChange={handleChange}
-                    required className={inputCls}>
-                    <option value="">Select…</option>
-                    {['Grade 7','Grade 8','Grade 9','Grade 10','Grade 11','Grade 12',
-                      '1st Year','2nd Year','3rd Year','4th Year'].map(y => (
-                      <option key={y} value={y}>{y}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                    Section <span className="text-red-500">*</span>
-                  </label>
-                  <input type="text" name="section" value={formData.section} onChange={handleChange}
-                    required className={inputCls} placeholder="A, B, C…"/>
-                </div>
-              </div>
-            </>
-          )}
-
-          {/* Employee-specific */}
-          {userType === 'employee' && (
-            <>
-              <div>
-                <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                  Employee Number <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="employeeNum" value={formData.employeeNum} onChange={handleChange}
-                  required className={inputCls} placeholder="EMP-12345"/>
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                  Position <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="position" value={formData.position} onChange={handleChange}
-                  required className={inputCls} placeholder="Faculty, Staff, Administrator…"/>
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-green-800 mb-1.5">
-                  Office/Department <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="office" value={formData.office} onChange={handleChange}
-                  required className={inputCls} placeholder="Registrar, IT, Library…"/>
-              </div>
-            </>
-          )}
-
-          {/* Password */}
-          <div>
-            <label className="block text-sm font-semibold text-green-800 mb-1.5">
-              Password <span className="text-red-500">*</span>
-            </label>
-            <input type="password" name="password" value={formData.password} onChange={handleChange}
-              required className={inputCls} placeholder="At least 6 characters"/>
-          </div>
-          <div>
-            <label className="block text-sm font-semibold text-green-800 mb-1.5">
-              Confirm Password <span className="text-red-500">*</span>
-            </label>
-            <input type="password" name="confirmPassword" value={formData.confirmPassword}
-              onChange={handleChange} required className={inputCls} placeholder="Re-enter password"/>
-          </div>
-
-          <button onClick={handleSubmit} disabled={loading}
-            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold py-3 px-4 rounded-2xl transition-all disabled:opacity-60 mt-2">
-            {loading ? 'Creating Account…' : '✓ Create Account'}
+          <button onClick={handleSubmit}
+            disabled={loading || !identifier || !password}
+            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold
+              py-3 px-4 rounded-2xl transition-all disabled:opacity-60">
+            {loading ? 'Signing in…' : '→ Sign In'}
           </button>
         </div>
 
         <div className="mt-6 text-center">
           <p className="text-sm text-gray-500">
-            Already have an account?{' '}
-            <Link href="/auth/signin" className="text-green-700 font-semibold hover:underline">
-              Sign in here
+            Don't have an account?{' '}
+            <Link href="/auth/register" className="text-green-700 font-semibold hover:underline">
+              Register here
             </Link>
           </p>
         </div>
       </div>
 
       <p className="text-green-300 text-xs mt-8">
-        © {new Date().getFullYear()} MVGFC · All rights reserved
+        © {new Date().getFullYear()} Manuel V. Gallego Foundation Colleges · All rights reserved
       </p>
     </div>
   )
@@ -7469,182 +6918,254 @@ export async function getServerSideProps(ctx) {
 }
 </file>
 
-<file path="pages/dashboard.jsx">
-import { useSession }       from 'next-auth/react'
-import Link                  from 'next/link'
-import AppLayout             from '../components/layout/AppLayout'
-import StatusBadge           from '../components/ui/StatusBadge'
-import Avatar                from '../components/ui/Avatar'
-import Spinner               from '../components/ui/Spinner'
-import { useBorrows }        from '../hooks/useBorrows'
-import { useNotifications }  from '../hooks/useNotifications'
-import { fmtDate }           from '../lib/utils'
-import api                   from '../lib/api'
+<file path="pages/dashboard/403.jsx">
+import Link from 'next/link'
+import Logo  from '../../components/ui/Logo'
 
-const E_RESOURCES = [
-  {
-    key:   'open-access',
-    href:  'https://www.mvgallegolibrary.com/open-access',
-    icon:  '🌐',
-    label: 'Open Access Databases',
-    sub:   'Free scholarly resources',
-    color: 'bg-blue-700'
-  },
-  {
-    key:   'e-journals',
-    href:  'https://www.mvgallegolibrary.com/e-journal-institutes',
-    icon:  '📰',
-    label: 'E-Journal Institutes',
-    sub:   'Academic journal access',
-    color: 'bg-indigo-700'
-  }
-]
+export default function ForbiddenPage() {
+  return (
+    <div className="min-h-screen bg-green-50 flex flex-col items-center justify-center text-center px-6">
+      <div className="mb-6">
+        <Logo size={16} dark={false}/>
+      </div>
+      <span className="text-6xl mb-6 block">🚫</span>
+      <h1 className="text-3xl font-bold text-green-800 mb-2">Access Denied</h1>
+      <p className="text-gray-500 text-sm max-w-sm mb-8">
+        You don't have permission to view this page. This area requires a higher privilege level.
+      </p>
+      <Link href="/dashboard/home"
+        className="bg-green-700 text-white font-semibold px-6 py-3 rounded-2xl hover:bg-green-800 transition">
+        ← Back to Dashboard
+      </Link>
+    </div>
+  )
+}
+</file>
 
-const QUICK = [
-  { href: '/borrow',        icon: '📖', label: 'Borrow a Book',  color: 'bg-green-700' },
-  { href: '/borrow/status', icon: '📋', label: 'My Requests',    color: 'bg-green-600' },
-  { href: '/chat',          icon: '💬', label: 'Chat Support',   color: 'bg-green-800' },
-  { href: '/profile',       icon: '👤', label: 'My Profile',     color: 'bg-green-500' }
-]
+<file path="pages/dashboard/analytics.jsx">
+import useSWR            from 'swr'
+import DashboardLayout   from '../../components/layout/DashboardLayout'
+import Spinner           from '../../components/ui/Spinner'
+import EmptyState        from '../../components/ui/EmptyState'
+import { withDashboardAuth } from '../../components/guards/withDashboardAuth'
+import api               from '../../lib/api'
 
-async function trackAndOpen(resource) {
-  // Fire-and-forget: don't block the navigation
-  api.post('/analytics/track', {
-    resourceName: resource.label,
-    resourceUrl:  resource.href
-  }).catch(() => {})
-  window.open(resource.href, '_blank', 'noopener,noreferrer')
+const fetcher = url => api.get(url).then(d => d.data)
+
+function fmtTime(iso) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString('en-PH', {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+  })
 }
 
-export default function Dashboard() {
-  const { data: session, status } = useSession()
-  const { borrows, loading } = useBorrows()
-  const { notifications, unread, markRead } = useNotifications()
+// Green-themed bar row
+function BarRow({ label, value, max, shade = '600' }) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0
+  return (
+    <div className="mb-3 last:mb-0">
+      <div className="flex justify-between text-xs mb-1">
+        <span className="font-semibold text-gray-700 truncate max-w-[70%]">{label}</span>
+        <span className="font-bold text-green-800">{value}</span>
+      </div>
+      <div className="w-full bg-green-100 rounded-full h-2.5">
+        <div className={`h-2.5 rounded-full bg-green-${shade} transition-all`} style={{ width: `${pct}%` }}/>
+      </div>
+    </div>
+  )
+}
 
-  if (status === 'loading') return null
-  if (!session) {
-    if (typeof window !== 'undefined') window.location.href = '/auth/signin'
-    return null
-  }
+function MiniSparkline({ daily }) {
+  if (!daily?.length) return null
+  const max = Math.max(...daily.map(d => d.count), 1)
+  return (
+    <div className="flex items-end gap-0.5 h-12">
+      {daily.slice(-14).map(d => (
+        <div key={d.date} className="flex-1 bg-green-500 rounded-sm"
+          style={{ height: `${Math.max(4, (d.count / max) * 48)}px` }}
+          title={`${d.date}: ${d.count} click${d.count !== 1 ? 's' : ''}`}/>
+      ))}
+    </div>
+  )
+}
 
-  const user    = session.user
-  const recent  = borrows.slice(0, 3)
-  const unreadN = notifications.filter(n => !n.isRead).slice(0, 3)
+// Distinct green shades for each resource bar
+const SHADES = ['800', '700', '600', '500']
+
+export default function AnalyticsPage() {
+  const { data, isLoading } = useSWR('/analytics', fetcher, { refreshInterval: 30_000 })
+
+  if (isLoading) return (
+    <DashboardLayout title="📊 Traffic Analytics"><Spinner/></DashboardLayout>
+  )
+
+  if (!data) return (
+    <DashboardLayout title="📊 Traffic Analytics">
+      <EmptyState icon="📊" title="No analytics data yet"
+        subtitle="Link clicks will appear here once users start visiting resources."/>
+    </DashboardLayout>
+  )
+
+  const { totalClicks, uniqueVisitors, resources = [], byInstitute = [], daily = [], recent = [] } = data
+  const maxClicks = Math.max(...resources.map(r => r.clicks), 1)
+  const maxInst   = Math.max(...byInstitute.map(i => i.clicks), 1)
 
   return (
-    <AppLayout title="MVGFC E-Library">
-      {/* Greeting card */}
-      <div className="bg-green-700 rounded-2xl p-5 mb-5 flex items-center gap-4 shadow-card">
-        <Avatar name={user.name} image={user.image} size={14}/>
-        <div className="flex-1 min-w-0">
-          <p className="text-green-200 text-xs">Good {greeting()},</p>
-          <p className="text-white font-bold text-base truncate">{user.name}</p>
-          <p className="text-green-300 text-xs mt-0.5 capitalize">{user.role} · {user.dept || 'MVGFC'}</p>
+    <DashboardLayout title="📊 Traffic Analytics">
+
+      {/* Summary strip — all green */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Clicks',      value: totalClicks,     icon: '🖱️', color: 'text-green-800 bg-green-50  border-green-200' },
+          { label: 'Unique Visitors',   value: uniqueVisitors,  icon: '👤', color: 'text-green-700 bg-green-50  border-green-300' },
+          { label: 'Resources Tracked', value: resources.length,icon: '🔗', color: 'text-green-700 bg-green-100 border-green-300' },
+          { label: 'Days Recorded',     value: daily.length,    icon: '📅', color: 'text-green-700 bg-green-100 border-green-300' },
+        ].map(s => (
+          <div key={s.label} className={`border rounded-2xl p-5 shadow-sm ${s.color}`}>
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide opacity-70">{s.label}</p>
+                <p className="text-3xl font-bold mt-1">{s.value}</p>
+              </div>
+              <span className="text-3xl opacity-80">{s.icon}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+
+        {/* Resource breakdown */}
+        <div className="lg:col-span-2 bg-white rounded-2xl border border-green-100 shadow-sm p-5">
+          <h3 className="font-bold text-green-800 mb-4">🔗 Clicks by Resource</h3>
+          {resources.length === 0
+            ? <p className="text-sm text-gray-400 text-center py-8">No resource clicks yet.</p>
+            : resources.map((r, i) => (
+                <div key={r.name} className="mb-5 last:mb-0">
+                  <div className="flex items-start justify-between gap-2 mb-1.5">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-gray-800 truncate">{r.name}</p>
+                      <a href={r.url} target="_blank" rel="noopener noreferrer"
+                        className="text-[10px] text-green-600 hover:underline truncate block max-w-[280px]">
+                        {r.url}
+                      </a>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-lg font-bold text-green-800">{r.clicks}</p>
+                      <p className="text-[10px] text-gray-400">{r.uniqueVisitors} unique</p>
+                    </div>
+                  </div>
+                  <div className="w-full bg-green-100 rounded-full h-2.5">
+                    <div className={`h-2.5 rounded-full bg-green-${SHADES[i % SHADES.length]}`}
+                      style={{ width: `${Math.round((r.clicks / maxClicks) * 100)}%` }}/>
+                  </div>
+                </div>
+              ))
+          }
+        </div>
+
+        {/* Institute breakdown */}
+        <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-5">
+          <h3 className="font-bold text-green-800 mb-4">🏛️ Clicks by Institute</h3>
+          {byInstitute.length === 0
+            ? <p className="text-sm text-gray-400 text-center py-8">No data yet.</p>
+            : byInstitute.map(({ institute, clicks }, i) => (
+                <BarRow key={institute} label={institute} value={clicks}
+                  max={maxInst} shade={SHADES[i % SHADES.length]}/>
+              ))
+          }
         </div>
       </div>
 
-      {/* Quick actions */}
-      <h2 className="text-green-800 font-semibold text-sm mb-3">Quick Actions</h2>
-      <div className="grid grid-cols-2 gap-3 mb-6">
-        {QUICK.map(q => (
-          <Link key={q.href} href={q.href}
-            className={`${q.color} rounded-2xl p-4 flex flex-col gap-2 shadow-card hover:opacity-90 transition`}>
-            <span className="text-2xl">{q.icon}</span>
-            <span className="text-white font-semibold text-sm">{q.label}</span>
-          </Link>
-        ))}
-      </div>
-
-      {/* ── E-Resources ── */}
-      <h2 className="text-green-800 font-semibold text-sm mb-3">📚 E-Journals &amp; Open Access Databases</h2>
-      <div className="grid grid-cols-1 gap-3 mb-6">
-        {E_RESOURCES.map(r => (
-          <button key={r.key} onClick={() => trackAndOpen(r)}
-            className={`${r.color} rounded-2xl p-4 flex items-center gap-4 shadow-card hover:opacity-90 transition w-full text-left`}>
-            <span className="text-3xl">{r.icon}</span>
-            <div className="flex-1 min-w-0">
-              <p className="text-white font-bold text-sm">{r.label}</p>
-              <p className="text-white/70 text-xs mt-0.5">{r.sub}</p>
-            </div>
-            <svg className="w-5 h-5 text-white/70 flex-shrink-0" fill="none" stroke="currentColor"
-              strokeWidth={2} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-            </svg>
-          </button>
-        ))}
-      </div>
-
-      {/* Unread notifications */}
-      {unreadN.length > 0 && (
-        <div className="mb-5">
+      {/* Daily sparkline */}
+      {daily.length > 0 && (
+        <div className="bg-white rounded-2xl border border-green-100 shadow-sm p-5 mb-6">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-green-800 font-semibold text-sm">Notifications</h2>
-            <span className="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{unread} new</span>
+            <h3 className="font-bold text-green-800">📈 Daily Activity (last 14 days)</h3>
+            <span className="text-xs text-gray-400">Each bar = 1 day</span>
           </div>
-          <div className="space-y-2">
-            {unreadN.map(n => (
-              <div key={n.id} onClick={() => markRead(n.id)}
-                className="bg-white rounded-xl border border-green-100 shadow-card p-3 cursor-pointer hover:bg-green-50 transition">
-                <div className="flex items-start gap-2">
-                  <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>
-                  <div>
-                    <p className="text-sm font-semibold text-gray-800">{n.title}</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{n.message}</p>
-                  </div>
-                </div>
-              </div>
-            ))}
+          <MiniSparkline daily={daily}/>
+          <div className="flex justify-between text-[10px] text-gray-400 mt-1.5">
+            <span>{daily.slice(-14)[0]?.date}</span>
+            <span>Today</span>
           </div>
         </div>
       )}
 
-      {/* Recent borrows */}
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-green-800 font-semibold text-sm">Recent Requests</h2>
-        <Link href="/borrow/status" className="text-green-600 text-xs font-medium">View all →</Link>
+      {/* Deep tracking tip */}
+      <div className="bg-green-50 border border-green-200 rounded-2xl p-5 mb-6">
+        <h3 className="font-bold text-green-800 mb-2 flex items-center gap-2">
+          <span>💡</span> Track specific resources on mvgallegolibrary.com
+        </h3>
+        <p className="text-xs text-gray-600 mb-3">
+          To track which specific database, file, or journal a user clicks inside the external site,
+          wrap those links on <strong>mvgallegolibrary.com</strong> with your e-library redirect URL:
+        </p>
+        <div className="bg-white border border-green-200 rounded-xl px-4 py-3 font-mono text-xs text-green-900 break-all select-all">
+          {`/api/analytics/redirect?name=EBSCO&url=https://search.ebscohost.com/...`}
+        </div>
+        <p className="text-[11px] text-gray-500 mt-2">
+          Replace <code className="bg-green-100 px-1 rounded">EBSCO</code> with any label and
+          <code className="bg-green-100 px-1 rounded ml-1">url</code> with the destination.
+          Every click will be logged with the user's name and institute automatically.
+        </p>
       </div>
 
-      {loading
-        ? <Spinner/>
-        : recent.length === 0
-          ? <div className="bg-white rounded-2xl border border-green-100 p-6 text-center shadow-card">
-              <p className="text-3xl mb-2">📚</p>
-              <p className="text-sm text-gray-500">No borrow requests yet.</p>
-              <Link href="/borrow" className="mt-3 inline-block text-green-700 font-semibold text-sm">
-                Borrow your first book →
-              </Link>
+      {/* Recent activity log */}
+      <div className="bg-white rounded-2xl border border-green-100 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 border-b border-green-50 flex items-center justify-between">
+          <h3 className="font-bold text-green-800">🕐 Recent Activity</h3>
+          <span className="text-xs text-gray-400">{recent.length} latest events</span>
+        </div>
+        {recent.length === 0
+          ? <div className="py-10 text-center text-gray-400 text-sm">No activity yet.</div>
+          : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-green-50 border-b border-green-100">
+                    {['User', 'Institute', 'Resource Accessed', 'Time'].map(h => (
+                      <th key={h} className="text-left px-4 py-2.5 text-xs font-bold text-green-700 uppercase tracking-wide whitespace-nowrap">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-green-50">
+                  {recent.map(e => (
+                    <tr key={e.id} className="hover:bg-green-50/40 transition">
+                      <td className="px-4 py-3">
+                        <p className="font-semibold text-sm text-gray-800">{e.userName}</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-semibold">
+                          {e.institute}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="text-xs font-medium text-gray-700">{e.resourceName}</p>
+                        <p className="text-[10px] text-green-600 hover:underline truncate max-w-[240px]">
+                          <a href={e.resourceUrl} target="_blank" rel="noopener noreferrer">
+                            {e.resourceUrl}
+                          </a>
+                        </p>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                        {fmtTime(e.timestamp)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          : <div className="space-y-3">
-              {recent.map(b => (
-                <div key={b.id} className="bg-white rounded-xl border border-green-100 shadow-card p-3 flex items-center gap-3">
-                  <div className="w-9 h-12 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📘</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800 truncate">{b.bookId}</p>
-                    <p className="text-xs text-gray-400">{fmtDate(b.requestDate)}</p>
-                  </div>
-                  <StatusBadge status={b.status}/>
-                </div>
-              ))}
-            </div>
-      }
-    </AppLayout>
+          )
+        }
+      </div>
+    </DashboardLayout>
   )
 }
 
-function greeting() {
-  const h = new Date().getHours()
-  if (h < 12) return 'morning'
-  if (h < 17) return 'afternoon'
-  return 'evening'
-}
-
-export async function getServerSideProps(ctx) {
-  const { getServerSession } = await import('next-auth/next')
-  const { authOptions }      = await import('./api/auth/[...nextauth]')
-  const session = await getServerSession(ctx.req, ctx.res, authOptions)
-  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
-  return { props: {} }
-}
+export const getServerSideProps = withDashboardAuth()
 </file>
 
 <file path="pages/dashboard/borrows.jsx">
@@ -7835,187 +7356,36 @@ export default function BorrowsPage() {
 export const getServerSideProps = withDashboardAuth()
 </file>
 
-<file path="pages/profile.jsx">
-import { signOut, useSession } from 'next-auth/react'
-import { useState }            from 'react'
-import AppLayout               from '../components/layout/AppLayout'
-import Avatar                  from '../components/ui/Avatar'
-import StatusBadge             from '../components/ui/StatusBadge'
-import Spinner                 from '../components/ui/Spinner'
-import { useNotifications }    from '../hooks/useNotifications'
-import { useBorrows }          from '../hooks/useBorrows'
-import { fmtDate, fmtTime }   from '../lib/utils'
-
-export default function ProfilePage() {
-  const { data: session }                   = useSession()
-  const [showAllNotifs, setShowAllNotifs]   = useState(false)
-  const [signingOut, setSigningOut]         = useState(false)
-  const { notifications, markRead, loading: nLoading } = useNotifications()
-  const { borrows }                         = useBorrows()
-
-  if (!session) return null
-  const user = session.user
-
-  const stats = {
-    total:    borrows.length,
-    active:   borrows.filter(b => b.status === 'APPROVED').length,
-    returned: borrows.filter(b => b.status === 'RETURNED').length,
-    pending:  borrows.filter(b => b.status === 'PENDING').length
-  }
-
-  const visibleNotifs = showAllNotifs ? notifications : notifications.slice(0, 5)
-
-  async function handleSignOut() {
-    setSigningOut(true)
-    await signOut({ callbackUrl: '/auth/signin' })
-  }
-
-  const STAT_ITEMS = [
-    { label: 'Total',    value: stats.total,    color: 'text-green-700' },
-    { label: 'Active',   value: stats.active,   color: 'text-blue-600' },
-    { label: 'Returned', value: stats.returned, color: 'text-gray-600' },
-    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600' }
-  ]
-
-  return (
-    <AppLayout title="My Profile">
-      {/* Profile card */}
-      <div className="bg-green-700 rounded-3xl p-5 mb-5 shadow-card">
-        <div className="flex items-center gap-4">
-          <Avatar name={user.name} image={user.image} size={16}/>
-          <div className="flex-1 min-w-0">
-            <p className="text-white font-bold text-base truncate">{user.name}</p>
-            <p className="text-green-200 text-xs truncate">{user.email}</p>
-            <div className="flex gap-2 mt-2 flex-wrap">
-              <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium capitalize">
-                {user.role}
-              </span>
-              {user.dept && (
-                <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium">
-                  {user.dept}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-4 gap-2 mb-5">
-        {STAT_ITEMS.map(s => (
-          <div key={s.label} className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
-            <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
-            <p className="text-[10px] text-gray-400 mt-0.5 font-medium">{s.label}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* Account info */}
-      <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
-        <div className="px-4 py-3 border-b border-green-50">
-          <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Account Information</p>
-        </div>
-        {[
-          { label: 'Full Name',   value: user.name },
-          { label: 'Email',       value: user.email },
-          { label: 'Role',        value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
-          { label: 'Department',  value: user.dept || '—' },
-          { label: 'Status',      value: <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">Active</span> }
-        ].map(row => (
-          <div key={row.label} className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
-            <span className="text-xs text-gray-500 font-medium">{row.label}</span>
-            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">{row.value}</span>
-          </div>
-        ))}
-      </div>
-
-
-        {user.userType === 'student' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Student ID</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.studentId}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Year & Section</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.year} - {user.section}</span>
-            </div>
-          </>
-        )}
-
-        {user.userType === 'employee' && (
-          <>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Employee No.</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.employeeNum}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Position</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.position}</span>
-            </div>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-green-50">
-              <span className="text-xs text-gray-500 font-medium">Office</span>
-              <span className="text-xs text-gray-800 font-semibold">{user.office}</span>
-            </div>
-          </>
-        )}
-
-      {/* Notifications */}
-      <div className="mb-5">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-sm font-bold text-green-800">Notifications</p>
-          <span className="text-xs text-gray-400">{notifications.filter(n => !n.isRead).length} unread</span>
-        </div>
-        {nLoading
-          ? <Spinner className="w-6 h-6"/>
-          : notifications.length === 0
-            ? <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
-                <p className="text-2xl mb-1">🔔</p>
-                <p className="text-xs text-gray-400">No notifications yet.</p>
-              </div>
-            : <>
-                <div className="space-y-2">
-                  {visibleNotifs.map(n => (
-                    <div key={n.id} onClick={() => !n.isRead && markRead(n.id)}
-                      className={`bg-white rounded-xl border shadow-card p-3 transition cursor-pointer
-                        ${n.isRead ? 'border-green-50 opacity-70' : 'border-green-200 hover:bg-green-50'}`}>
-                      <div className="flex gap-2">
-                        {!n.isRead && <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-gray-800">{n.title}</p>
-                          <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.message}</p>
-                          <p className="text-[10px] text-gray-300 mt-1">{fmtTime(n.createdAt)}</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {notifications.length > 5 && (
-                  <button onClick={() => setShowAllNotifs(!showAllNotifs)}
-                    className="mt-2 w-full text-center text-xs text-green-600 font-semibold py-2">
-                    {showAllNotifs ? '▲ Show less' : `▼ Show all ${notifications.length} notifications`}
-                  </button>
-                )}
-              </>
-        }
-      </div>
-
-      {/* Sign out */}
-      <button onClick={handleSignOut} disabled={signingOut}
-        className="w-full border-2 border-red-200 text-red-500 font-semibold py-3.5 rounded-2xl
-          hover:bg-red-50 transition disabled:opacity-50 mb-8">
-        {signingOut ? 'Signing out…' : '↩ Sign Out'}
-      </button>
-    </AppLayout>
-  )
-}
-
-export async function getServerSideProps(ctx) {
-  const { getServerSession } = await import('next-auth/next')
-  const { authOptions }      = await import('./api/auth/[...nextauth]')
-  const session = await getServerSession(ctx.req, ctx.res, authOptions)
-  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
-  return { props: {} }
+<file path="public/manifest.json">
+{
+  "name": "MVGFC E-Library",
+  "short_name": "E-Library",
+  "description": "Manuel V. Gallego Foundation Colleges — Academic Library Management System",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#F1F8E9",
+  "theme_color": "#1B5E20",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/mvgfc-logo.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "screenshots": [],
+  "categories": ["education", "productivity"]
 }
 </file>
 
@@ -8130,6 +7500,72 @@ export default function BottomNav() {
         })}
       </div>
     </nav>
+  )
+}
+</file>
+
+<file path="components/layout/Sidebar.jsx">
+import Link          from 'next/link'
+import { useRouter }  from 'next/router'
+import { useSession } from 'next-auth/react'
+import Logo           from '../ui/Logo'
+
+const NAV_ALL = [
+  { href: '/dashboard/home',    icon: '🏠', label: 'Overview'         },
+  { href: '/dashboard/borrows', icon: '📚', label: 'Borrow Requests'  },
+  { href: '/dashboard/chat',    icon: '💬', label: 'Chat Console'     },
+  { href: '/dashboard/notices', icon: '📄', label: 'Generate Notices' },
+]
+const NAV_ADMIN = [
+  { href: '/dashboard/users',     icon: '👥', label: 'User Management' },
+  { href: '/dashboard/analytics', icon: '📊', label: 'Analytics'       },
+]
+
+export default function Sidebar() {
+  const { pathname }      = useRouter()
+  const { data: session } = useSession()
+  const isAdmin = session?.user?.role === 'admin'
+
+  const links = isAdmin ? [...NAV_ALL, ...NAV_ADMIN] : NAV_ALL
+
+  return (
+    <aside className="w-56 bg-green-800 min-h-screen flex flex-col flex-shrink-0 shadow-xl">
+      {/* Brand */}
+      <div className="px-5 py-5 border-b border-green-700">
+        <div className="flex items-center gap-3">
+          <Logo size={9} dark={true}/>
+          <div>
+            <p className="text-white font-bold text-sm leading-tight">MVGFC E-Library</p>
+            <p className="text-green-300 text-[10px]">
+              {isAdmin ? 'Admin Panel' : 'Clerk Panel'}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Navigation */}
+      <nav className="flex-1 px-3 py-4 space-y-1">
+        {links.map(({ href, icon, label }) => {
+          const active = pathname === href
+          return (
+            <Link key={href} href={href}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all
+                ${active
+                  ? 'bg-white text-green-800 shadow-sm'
+                  : 'text-green-100 hover:bg-green-700 hover:text-white'}`}>
+              <span className="text-base w-5 text-center">{icon}</span>
+              {label}
+            </Link>
+          )
+        })}
+      </nav>
+
+      {/* Session info */}
+      <div className="px-4 py-4 border-t border-green-700">
+        <p className="text-green-200 text-xs font-medium truncate">{session?.user?.name}</p>
+        <p className="text-green-400 text-[10px] mt-0.5 capitalize">{session?.user?.role}</p>
+      </div>
+    </aside>
   )
 }
 </file>
@@ -8322,379 +7758,638 @@ export default compose(
 )(handlerRemind)
 </file>
 
-<file path="pages/chat.jsx">
-import { useRef, useEffect, useState } from 'react'
-import { useSession }      from 'next-auth/react'
-import { useRouter }       from 'next/router'
-import { v4 as uuid }      from 'uuid'
-import MessageBubble       from '../components/chat/MessageBubble'
-import ComplaintTag        from '../components/chat/ComplaintTag'
-import Spinner             from '../components/ui/Spinner'
-import Toast               from '../components/ui/Toast'
-import { useChat }         from '../hooks/useChat'
-import { useNotifications } from '../hooks/useNotifications'
+<file path="pages/auth/register.jsx">
+import { useState } from 'react'
+import { useRouter } from 'next/router'
+import Link from 'next/link'
+import { INSTITUTES } from '../../lib/constants'
+import Logo from '../../components/ui/Logo'
 
-const MSG_TYPES = [
-  { id: 'INQUIRY',   label: '🔍 Inquiry',   desc: 'Ask about books or services' },
-  { id: 'FEEDBACK',  label: '💬 Feedback',  desc: 'Share your experience' },
-  { id: 'COMPLAINT', label: '⚠️ Complaint', desc: 'Report an issue' }
-]
-const LIBRARIES = [
-  { id: 'HIGH_SCHOOL',  label: '🏫 High School Library', desc: 'For HS students and faculty' },
-  { id: 'MAIN_LIBRARY', label: '📚 Main Library',        desc: 'For college departments' }
-]
+export default function RegisterPage() {
+  const router = useRouter()
+  const [userType, setUserType] = useState('student')
+  const [loading,  setLoading]  = useState(false)
+  const [error,    setError]    = useState('')
 
-function fmtTime(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  const now = new Date()
-  if (d.toDateString() === now.toDateString())
-    return d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
-  return d.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })
-}
+  const [formData, setFormData] = useState({
+    name: '', email: '', password: '', confirmPassword: '',
+    institute: '',
+    studentId: '', year: '', section: '',
+    employeeNum: '', position: '', office: ''
+  })
 
-export default function ChatPage() {
-  const router  = useRouter()
-  const { data: session }  = useSession()
-  const { notifications, markRead } = useNotifications()
-  const {
-    threads, threadsLoading,
-    messages, messagesLoading,
-    activeThreadId, setActiveThreadId,
-    sendMessage
-  } = useChat()
+  const handleChange = e =>
+    setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }))
 
-  const userId = session?.user?.id
+  const handleSubmit = async e => {
+    e.preventDefault()
+    setError('')
+    if (formData.password !== formData.confirmPassword) { setError('Passwords do not match'); return }
+    if (formData.password.length < 6) { setError('Password must be at least 6 characters'); return }
+    if (!formData.institute) { setError('Please select your institute'); return }
 
-  // New ticket form state
-  const [showNewForm, setShowNewForm] = useState(false)
-  const [newMsgType,  setNewMsgType]  = useState(null)
-  const [newLibrary,  setNewLibrary]  = useState(null)
-  const [newText,     setNewText]     = useState('')
-  const [startingNew, setStartingNew] = useState(false)
-
-  // Active thread reply state
-  const [replyText,  setReplyText]  = useState('')
-  const [isSending,  setIsSending]  = useState(false)
-  const submitLockRef = useRef(false)
-  const lastSubmitRef = useRef(0)
-
-  const [toast, setToast] = useState(null)
-  const bottomRef    = useRef(null)
-  const textareaRef  = useRef(null)
-
-  // Auto-scroll
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
-
-  // Auto-clear chat-reply notifications on open
-  useEffect(() => {
-    if (!notifications.length) return
-    notifications
-      .filter(n => !n.isRead && n.type === 'CHAT_REPLY')
-      .forEach(n => markRead(n.id))
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notifications.length])
-
-  const activeThread = threads.find(t => t.threadId === activeThreadId) || null
-  const isResolved   = activeThread?.threadStatus === 'RESOLVED'
-
-  // ── Create new ticket ────────────────────────────────────────────────────
-  async function handleCreateTicket() {
-    if (!newText.trim() || !newMsgType || !newLibrary) {
-      setToast({ message: 'Please fill in all fields', type: 'error' })
-      return
-    }
-    setStartingNew(true)
-    const newThreadId = uuid()  // client-generated UUID = new ticket
+    setLoading(true)
     try {
-      await sendMessage(newText.trim(), newMsgType, newLibrary, newThreadId)
-      setShowNewForm(false)
-      setNewText('')
-      setNewMsgType(null)
-      setNewLibrary(null)
-      setActiveThreadId(newThreadId)
-    } catch (err) {
-      setToast({ message: err.message || 'Failed to create ticket.', type: 'error' })
-    } finally {
-      setStartingNew(false)
-    }
-  }
-
-  // ── Reply to active thread ───────────────────────────────────────────────
-  async function handleReply() {
-    const trimmed = replyText.trim()
-    if (!trimmed || submitLockRef.current || isSending || isResolved) return
-    const now = Date.now()
-    if (now - lastSubmitRef.current < 1000) return
-
-    submitLockRef.current   = true
-    setIsSending(true)
-    lastSubmitRef.current   = now
-    setReplyText('')
-
-    try {
-      await sendMessage(trimmed)
-    } catch (err) {
-      if (!err.message?.includes('progress')) {
-        setReplyText(trimmed)
-        setToast({ message: err.message || 'Failed to send.', type: 'error' })
+      const payload = {
+        name: formData.name, email: formData.email,
+        password: formData.password, institute: formData.institute, userType,
+        ...(userType === 'student'
+          ? { studentId: formData.studentId, year: formData.year, section: formData.section }
+          : { employeeNum: formData.employeeNum, position: formData.position, office: formData.office })
       }
+      const res  = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      const data = await res.json()
+      if (data.success) {
+        alert('Registration successful! Please sign in.')
+        router.push('/auth/signin')
+      } else {
+        setError(data.error || 'Registration failed')
+      }
+    } catch {
+      setError('Registration failed. Please try again.')
     } finally {
-      setTimeout(() => { submitLockRef.current = false; setIsSending(false) }, 1500)
-      textareaRef.current?.focus()
+      setLoading(false)
     }
   }
 
-  function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      e.stopPropagation()
-      if (!submitLockRef.current && !isSending) handleReply()
-    }
-  }
-
-  const canSend = replyText.trim() && !submitLockRef.current && !isSending && !isResolved
+  const inputCls = 'w-full px-4 py-2.5 border border-green-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-green-500'
 
   return (
-    <div className="min-h-screen bg-green-50 flex flex-col safe-top">
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+    <div className="min-h-screen bg-green-800 flex flex-col items-center justify-center px-6 py-12">
+      {/* Logo + wordmark */}
+      <div className="flex flex-col items-center mb-8">
+        <div className="w-24 h-24 rounded-2xl bg-white flex items-center justify-center shadow-xl mb-4 p-2">
+          <Logo size={16} dark={false}/>
+        </div>
+        <h1 className="text-white text-2xl font-bold tracking-wide">Create Account</h1>
+        <p className="text-green-200 text-sm mt-1">MVGFC E-Library System</p>
+      </div>
 
-      {/* Top bar */}
-      <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30">
-        {activeThreadId
-          ? (
-            <button onClick={() => setActiveThreadId(null)}
-              className="p-1 rounded-full hover:bg-green-700 transition">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
-              </svg>
-            </button>
-          )
-          : (
-            <button onClick={() => router.back()}
-              className="p-1 rounded-full hover:bg-green-700 transition">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
-              </svg>
-            </button>
-          )
-        }
-        <div className="w-9 h-9 rounded-full bg-green-600 flex items-center justify-center flex-shrink-0">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round"
-              d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-          </svg>
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="font-semibold text-sm">
-            {activeThreadId
-              ? `${LIBRARIES.find(l => l.id === activeThread?.library)?.label.split(' ').slice(1).join(' ') || 'Library'} Support`
-              : 'My Tickets'}
-          </p>
-          <p className="text-green-300 text-xs">
-            {activeThreadId
-              ? isResolved ? '✔ Resolved' : '🟢 Active'
-              : `${threads.length} ticket${threads.length !== 1 ? 's' : ''}`}
-          </p>
-        </div>
-        {!activeThreadId && (
-          <button
-            onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
-            className="bg-white text-green-800 text-xs font-bold px-3 py-1.5 rounded-xl hover:bg-green-100 transition flex-shrink-0">
-            + New Ticket
-          </button>
+      <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-8 max-h-[85vh] overflow-y-auto">
+        <h2 className="text-green-800 text-xl font-bold mb-1">Welcome!</h2>
+        <p className="text-gray-500 text-sm mb-6">Create your library account</p>
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl mb-4 text-sm">
+            {error}
+          </div>
         )}
-      </header>
 
-      {/* ── THREAD LIST VIEW ─────────────────────────────────────────────── */}
-      {!activeThreadId && (
-        <div className="flex-1 overflow-y-auto max-w-lg mx-auto w-full">
-
-          {/* New ticket form */}
-          {showNewForm && (
-            <div className="m-4 bg-white rounded-2xl border border-green-200 p-4 shadow-sm space-y-3">
-              <p className="text-sm font-bold text-green-800">New Support Ticket</p>
-
-              <div>
-                <p className="text-xs font-semibold text-green-700 mb-1.5 uppercase tracking-wide">Library</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {LIBRARIES.map(lib => (
-                    <button key={lib.id} onClick={() => setNewLibrary(lib.id)}
-                      className={`p-2.5 rounded-xl border-2 text-xs font-semibold text-left transition
-                        ${newLibrary === lib.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
-                      {lib.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs font-semibold text-green-700 mb-1.5 uppercase tracking-wide">Type</p>
-                <div className="grid grid-cols-3 gap-2">
-                  {MSG_TYPES.map(t => (
-                    <button key={t.id} onClick={() => setNewMsgType(t.id)}
-                      className={`p-2 rounded-xl border-2 text-center text-xs font-semibold transition
-                        ${newMsgType === t.id ? 'border-green-600 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
-                      <span className="block text-base">{t.label.split(' ')[0]}</span>
-                      {t.label.split(' ')[1]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <textarea
-                value={newText}
-                onChange={e => setNewText(e.target.value)}
-                rows={3}
-                placeholder="Describe your inquiry, feedback, or complaint…"
-                className="w-full border border-green-200 rounded-xl px-3 py-2 text-sm
-                  focus:outline-none focus:ring-2 focus:ring-green-500 resize-none bg-green-50"
-              />
-
-              <div className="flex gap-2">
-                <button onClick={() => { setShowNewForm(false); setNewText(''); setNewMsgType(null); setNewLibrary(null) }}
-                  className="flex-1 border-2 border-gray-200 text-gray-600 text-xs font-semibold py-2 rounded-xl hover:bg-gray-50 transition">
-                  Cancel
+        <div className="space-y-4">
+          {/* User type */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-2">
+              I am a <span className="text-red-500">*</span>
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              {[['student','🎓 Student'],['employee','💼 Employee']].map(([val,lbl]) => (
+                <button key={val} type="button" onClick={() => setUserType(val)}
+                  className={`py-3 px-4 rounded-xl border-2 font-semibold text-sm transition
+                    ${userType === val
+                      ? 'border-green-600 bg-green-50 text-green-800'
+                      : 'border-gray-200 bg-white text-gray-600 hover:border-green-300'}`}>
+                  {lbl}
                 </button>
-                <button onClick={handleCreateTicket}
-                  disabled={startingNew || !newText.trim() || !newMsgType || !newLibrary}
-                  className="flex-1 bg-green-700 text-white text-xs font-semibold py-2 rounded-xl hover:bg-green-800 transition disabled:opacity-50">
-                  {startingNew ? 'Sending…' : '✔ Submit Ticket'}
-                </button>
-              </div>
+              ))}
             </div>
-          )}
-
-          {/* Ticket list */}
-          {threadsLoading ? (
-            <Spinner/>
-          ) : threads.length === 0 && !showNewForm ? (
-            <div className="flex flex-col items-center justify-center h-64 text-center px-6">
-              <span className="text-5xl mb-4">💬</span>
-              <p className="font-semibold text-green-800">No tickets yet</p>
-              <p className="text-gray-400 text-sm mt-1">Tap <strong>+ New Ticket</strong> to contact library staff.</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-green-50">
-              {threads.map(t => {
-                const lib     = LIBRARIES.find(l => l.id === t.library)
-                const resolved = t.threadStatus === 'RESOLVED'
-                return (
-                  <button key={t.threadId}
-                    onClick={() => { setActiveThreadId(t.threadId); setShowNewForm(false) }}
-                    className="w-full text-left px-4 py-4 hover:bg-green-50 transition flex gap-3 items-start">
-                    {/* Icon */}
-                    <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center text-white text-sm font-bold
-                      ${resolved ? 'bg-gray-400' : 'bg-green-600'}`}>
-                      {t.messageType === 'COMPLAINT' ? '⚠' : t.messageType === 'FEEDBACK' ? '💬' : '🔍'}
-                    </div>
-
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <ComplaintTag type={t.messageType}/>
-                          {resolved && (
-                            <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">
-                              ✔ Resolved
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtTime(t.lastTimestamp)}</span>
-                      </div>
-                      <p className="text-xs text-green-700 mt-0.5 font-medium">{lib?.label || t.library}</p>
-                      <p className="text-xs text-gray-500 mt-0.5 truncate">{t.lastMessage}</p>
-                    </div>
-
-                    {t.unreadCount > 0 && (
-                      <span className="flex-shrink-0 w-5 h-5 bg-red-500 text-white text-[10px]
-                        font-bold rounded-full flex items-center justify-center">
-                        {t.unreadCount > 9 ? '9+' : t.unreadCount}
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── THREAD DETAIL VIEW ───────────────────────────────────────────── */}
-      {activeThreadId && (
-        <>
-          <div className="flex-1 overflow-y-auto px-4 pt-4 pb-4 max-w-lg mx-auto w-full chat-scroll">
-            {messagesLoading ? <Spinner/> : (
-              <>
-                <div className="bg-green-100 rounded-xl px-3 py-2 mb-4 text-center">
-                  <p className="text-xs text-green-700">
-                    💡 Library staff will reply as soon as possible. Please be patient.
-                  </p>
-                </div>
-
-                {messages.map(msg => (
-                  <MessageBubble key={msg.id} msg={msg} isOwn={msg.senderId === userId}/>
-                ))}
-
-                {isResolved && (
-                  <div className="text-center my-4 space-y-3">
-                    <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full inline-block">
-                      ✔ This conversation has been resolved
-                    </span>
-                    <div>
-                      <button
-                        onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
-                        className="bg-green-700 hover:bg-green-800 text-white text-xs
-                          font-semibold px-4 py-2 rounded-xl transition">
-                        + Open New Ticket
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div ref={bottomRef}/>
-              </>
-            )}
           </div>
 
-          {/* Reply input — hidden when resolved */}
-          {!isResolved && (
-            <form onSubmit={e => { e.preventDefault(); e.stopPropagation() }}
-              className="sticky bottom-0 w-full max-w-lg mx-auto bg-white border-t border-green-100 px-4 py-3">
-              <div className="flex gap-2 items-end">
-                <textarea
-                  ref={textareaRef}
-                  value={replyText}
-                  onChange={e => setReplyText(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  rows={1}
-                  disabled={isSending}
-                  placeholder="Type a reply…"
-                  className="flex-1 resize-none border border-green-200 rounded-xl px-3 py-2 text-sm
-                    focus:outline-none focus:ring-2 focus:ring-green-500 max-h-28 bg-green-50
-                    placeholder-gray-400 disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{ overflowY: replyText.split('\n').length > 3 ? 'auto' : 'hidden' }}
-                />
-                <button onClick={handleReply} disabled={!canSend} type="button"
-                  className="w-10 h-10 rounded-xl bg-green-700 text-white flex items-center
-                    justify-center disabled:opacity-40 hover:bg-green-800 transition flex-shrink-0">
-                  {isSending
-                    ? <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
-                        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
-                        <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
-                      </svg>
-                    : <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
-                      </svg>
-                  }
-                </button>
+          {/* Full name */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Full Name <span className="text-red-500">*</span>
+            </label>
+            <input type="text" name="name" value={formData.name} onChange={handleChange}
+              required className={inputCls} placeholder="Juan Dela Cruz"/>
+          </div>
+
+          {/* Email */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Email Address <span className="text-red-500">*</span>
+            </label>
+            <input type="email" name="email" value={formData.email} onChange={handleChange}
+              required className={inputCls}
+              placeholder={userType === 'student' ? 'student@mvgfc.edu.ph' : 'employee@mvgfc.edu.ph'}/>
+            <p className="text-xs text-gray-400 mt-1">Use your official school email for notifications</p>
+          </div>
+
+          {/* Institute */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Institute <span className="text-red-500">*</span>
+            </label>
+            <select name="institute" value={formData.institute} onChange={handleChange}
+              required className={inputCls}>
+              <option value="">Select institute…</option>
+              {INSTITUTES.map(i => <option key={i} value={i}>{i}</option>)}
+            </select>
+          </div>
+
+          {/* Student-specific */}
+          {userType === 'student' && (
+            <>
+              <div>
+                <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                  Student ID Number <span className="text-red-500">*</span>
+                </label>
+                <input type="text" name="studentId" value={formData.studentId} onChange={handleChange}
+                  required className={inputCls} placeholder="2024-12345"/>
               </div>
-            </form>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                    Year Level <span className="text-red-500">*</span>
+                  </label>
+                  <select name="year" value={formData.year} onChange={handleChange}
+                    required className={inputCls}>
+                    <option value="">Select…</option>
+                    {['Grade 7','Grade 8','Grade 9','Grade 10','Grade 11','Grade 12',
+                      '1st Year','2nd Year','3rd Year','4th Year'].map(y => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                    Section <span className="text-red-500">*</span>
+                  </label>
+                  <input type="text" name="section" value={formData.section} onChange={handleChange}
+                    required className={inputCls} placeholder="A, B, C…"/>
+                </div>
+              </div>
+            </>
           )}
-        </>
-      )}
+
+          {/* Employee-specific */}
+          {userType === 'employee' && (
+            <>
+              <div>
+                <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                  Employee Number <span className="text-red-500">*</span>
+                </label>
+                <input type="text" name="employeeNum" value={formData.employeeNum} onChange={handleChange}
+                  required className={inputCls} placeholder="EMP-12345"/>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                  Position <span className="text-red-500">*</span>
+                </label>
+                <input type="text" name="position" value={formData.position} onChange={handleChange}
+                  required className={inputCls} placeholder="Faculty, Staff, Administrator…"/>
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-green-800 mb-1.5">
+                  Office/Department <span className="text-red-500">*</span>
+                </label>
+                <input type="text" name="office" value={formData.office} onChange={handleChange}
+                  required className={inputCls} placeholder="Registrar, IT, Library…"/>
+              </div>
+            </>
+          )}
+
+          {/* Password */}
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Password <span className="text-red-500">*</span>
+            </label>
+            <input type="password" name="password" value={formData.password} onChange={handleChange}
+              required className={inputCls} placeholder="At least 6 characters"/>
+          </div>
+          <div>
+            <label className="block text-sm font-semibold text-green-800 mb-1.5">
+              Confirm Password <span className="text-red-500">*</span>
+            </label>
+            <input type="password" name="confirmPassword" value={formData.confirmPassword}
+              onChange={handleChange} required className={inputCls} placeholder="Re-enter password"/>
+          </div>
+
+          <button onClick={handleSubmit} disabled={loading}
+            className="w-full bg-green-700 hover:bg-green-800 text-white font-semibold
+              py-3 px-4 rounded-2xl transition-all disabled:opacity-60 mt-2">
+            {loading ? 'Creating Account…' : '✓ Create Account'}
+          </button>
+        </div>
+
+        <div className="mt-6 text-center">
+          <p className="text-sm text-gray-500">
+            Already have an account?{' '}
+            <Link href="/auth/signin" className="text-green-700 font-semibold hover:underline">
+              Sign in here
+            </Link>
+          </p>
+        </div>
+      </div>
+
+      <p className="text-green-300 text-xs mt-8">
+        © {new Date().getFullYear()} Manuel V. Gallego Foundation Colleges · All rights reserved
+      </p>
     </div>
+  )
+}
+</file>
+
+<file path="pages/dashboard.jsx">
+import { useSession }       from 'next-auth/react'
+import Link                  from 'next/link'
+import AppLayout             from '../components/layout/AppLayout'
+import StatusBadge           from '../components/ui/StatusBadge'
+import Avatar                from '../components/ui/Avatar'
+import Spinner               from '../components/ui/Spinner'
+import Logo                  from '../components/ui/Logo'
+import { useBorrows }        from '../hooks/useBorrows'
+import { useNotifications }  from '../hooks/useNotifications'
+import { fmtDate }           from '../lib/utils'
+import api                   from '../lib/api'
+
+const E_RESOURCES = [
+  {
+    key:   'open-access',
+    href:  'https://www.mvgallegolibrary.com/open-access',
+    icon:  '🌐',
+    label: 'Open Access Databases',
+    sub:   'Free scholarly resources',
+    color: 'bg-green-700'
+  },
+  {
+    key:   'e-journals',
+    href:  'https://www.mvgallegolibrary.com/e-journal-institutes',
+    icon:  '📰',
+    label: 'E-Journal Institutes',
+    sub:   'Academic journal access',
+    color: 'bg-green-800'
+  }
+]
+
+const QUICK = [
+  { href: '/borrow',        icon: '📖', label: 'Borrow a Book',  color: 'bg-green-700' },
+  { href: '/borrow/status', icon: '📋', label: 'My Requests',    color: 'bg-green-600' },
+  { href: '/chat',          icon: '💬', label: 'Chat Support',   color: 'bg-green-800' },
+  { href: '/profile',       icon: '👤', label: 'My Profile',     color: 'bg-green-500' }
+]
+
+async function trackAndOpen(resource) {
+  // Fire-and-forget: don't block the navigation
+  api.post('/analytics/track', {
+    resourceName: resource.label,
+    resourceUrl:  resource.href
+  }).catch(() => {})
+  window.open(resource.href, '_blank', 'noopener,noreferrer')
+}
+
+export default function Dashboard() {
+  const { data: session, status } = useSession()
+  const { borrows, loading } = useBorrows()
+  const { notifications, unread, markRead } = useNotifications()
+
+  if (status === 'loading') return null
+  if (!session) {
+    if (typeof window !== 'undefined') window.location.href = '/auth/signin'
+    return null
+  }
+
+  const user    = session.user
+  const recent  = borrows.slice(0, 3)
+  const unreadN = notifications.filter(n => !n.isRead).slice(0, 3)
+
+  return (
+    <AppLayout title="MVGFC E-Library">
+      {/* Greeting card */}
+      <div className="bg-green-700 rounded-2xl p-5 mb-5 flex items-center gap-4 shadow-card">
+        <div className="flex-shrink-0 flex items-center gap-3">
+          <Logo size={10} dark={true}/>
+          <Avatar name={user.name} image={user.image} size={12}/>
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-green-200 text-xs">Good {greeting()},</p>
+          <p className="text-white font-bold text-base truncate">{user.name}</p>
+          <p className="text-green-300 text-xs mt-0.5 capitalize">{user.role} · {user.dept || 'MVGFC'}</p>
+        </div>
+      </div>
+
+      {/* Quick actions */}
+      <h2 className="text-green-800 font-semibold text-sm mb-3">Quick Actions</h2>
+      <div className="grid grid-cols-2 gap-3 mb-6">
+        {QUICK.map(q => (
+          <Link key={q.href} href={q.href}
+            className={`${q.color} rounded-2xl p-4 flex flex-col gap-2 shadow-card hover:opacity-90 transition`}>
+            <span className="text-2xl">{q.icon}</span>
+            <span className="text-white font-semibold text-sm">{q.label}</span>
+          </Link>
+        ))}
+      </div>
+
+      {/* ── E-Resources ── */}
+      <h2 className="text-green-800 font-semibold text-sm mb-3">📚 E-Journals &amp; Open Access Databases</h2>
+      <div className="grid grid-cols-1 gap-3 mb-6">
+        {E_RESOURCES.map(r => (
+          <button key={r.key} onClick={() => trackAndOpen(r)}
+            className={`${r.color} rounded-2xl p-4 flex items-center gap-4 shadow-card hover:opacity-90 transition w-full text-left`}>
+            <span className="text-3xl">{r.icon}</span>
+            <div className="flex-1 min-w-0">
+              <p className="text-white font-bold text-sm">{r.label}</p>
+              <p className="text-white/70 text-xs mt-0.5">{r.sub}</p>
+            </div>
+            <svg className="w-5 h-5 text-white/70 flex-shrink-0" fill="none" stroke="currentColor"
+              strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+            </svg>
+          </button>
+        ))}
+      </div>
+
+      {/* Unread notifications */}
+      {unreadN.length > 0 && (
+        <div className="mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-green-800 font-semibold text-sm">Notifications</h2>
+            <span className="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{unread} new</span>
+          </div>
+          <div className="space-y-2">
+            {unreadN.map(n => (
+              <div key={n.id} onClick={() => markRead(n.id)}
+                className="bg-white rounded-xl border border-green-100 shadow-card p-3 cursor-pointer hover:bg-green-50 transition">
+                <div className="flex items-start gap-2">
+                  <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>
+                  <div>
+                    <p className="text-sm font-semibold text-gray-800">{n.title}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{n.message}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Recent borrows */}
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-green-800 font-semibold text-sm">Recent Requests</h2>
+        <Link href="/borrow/status" className="text-green-600 text-xs font-medium">View all →</Link>
+      </div>
+
+      {loading
+        ? <Spinner/>
+        : recent.length === 0
+          ? <div className="bg-white rounded-2xl border border-green-100 p-6 text-center shadow-card">
+              <p className="text-3xl mb-2">📚</p>
+              <p className="text-sm text-gray-500">No borrow requests yet.</p>
+              <Link href="/borrow" className="mt-3 inline-block text-green-700 font-semibold text-sm">
+                Borrow your first book →
+              </Link>
+            </div>
+          : <div className="space-y-3">
+              {recent.map(b => (
+                <div key={b.id} className="bg-white rounded-xl border border-green-100 shadow-card p-3 flex items-center gap-3">
+                  <div className="w-9 h-12 bg-green-100 rounded-lg flex items-center justify-center text-lg flex-shrink-0">📘</div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-800 truncate">{b.bookId}</p>
+                    <p className="text-xs text-gray-400">{fmtDate(b.requestDate)}</p>
+                  </div>
+                  <StatusBadge status={b.status}/>
+                </div>
+              ))}
+            </div>
+      }
+    </AppLayout>
+  )
+}
+
+function greeting() {
+  const h = new Date().getHours()
+  if (h < 12) return 'morning'
+  if (h < 17) return 'afternoon'
+  return 'evening'
+}
+
+export async function getServerSideProps(ctx) {
+  const { getServerSession } = await import('next-auth/next')
+  const { authOptions }      = await import('./api/auth/[...nextauth]')
+  const session = await getServerSession(ctx.req, ctx.res, authOptions)
+  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
+  return { props: {} }
+}
+</file>
+
+<file path="pages/profile.jsx">
+import { signOut, useSession } from 'next-auth/react'
+import { useState }            from 'react'
+import AppLayout               from '../components/layout/AppLayout'
+import Avatar                  from '../components/ui/Avatar'
+import Spinner                 from '../components/ui/Spinner'
+import Logo                    from '../components/ui/Logo'
+import { useNotifications }    from '../hooks/useNotifications'
+import { useBorrows }          from '../hooks/useBorrows'
+import { fmtDate, fmtTime }    from '../lib/utils'
+
+export default function ProfilePage() {
+  const { data: session }                 = useSession()
+  const [showAllNotifs, setShowAllNotifs] = useState(false)
+  const [signingOut, setSigningOut]       = useState(false)
+  const { notifications, markRead, loading: nLoading } = useNotifications()
+  const { borrows } = useBorrows()
+
+  if (!session) return null
+  const user = session.user
+
+  const stats = {
+    total:    borrows.length,
+    active:   borrows.filter(b => b.status === 'APPROVED').length,
+    returned: borrows.filter(b => b.status === 'RETURNED').length,
+    pending:  borrows.filter(b => b.status === 'PENDING').length
+  }
+
+  const visibleNotifs = showAllNotifs ? notifications : notifications.slice(0, 5)
+
+  async function handleSignOut() {
+    setSigningOut(true)
+    await signOut({ callbackUrl: '/auth/signin' })
+  }
+
+  const STAT_ITEMS = [
+    { label: 'Total',    value: stats.total,    color: 'text-green-700' },
+    { label: 'Active',   value: stats.active,   color: 'text-green-600' },
+    { label: 'Returned', value: stats.returned, color: 'text-gray-600'  },
+    { label: 'Pending',  value: stats.pending,  color: 'text-yellow-600'}
+  ]
+
+  return (
+    <AppLayout title="My Profile">
+
+      {/* ── Profile card ── */}
+      <div className="bg-green-700 rounded-3xl p-5 mb-5 shadow-card">
+        {/* School branding strip */}
+        <div className="flex items-center gap-3 mb-4 pb-3 border-b border-green-600">
+          <Logo size={10} dark={true}/>
+          <div className="min-w-0">
+            <p className="text-white font-bold text-sm leading-tight truncate">
+              Manuel V. Gallego Foundation Colleges
+            </p>
+            <p className="text-green-300 text-[10px]">MVGFC E-Library System</p>
+          </div>
+        </div>
+
+        {/* User info */}
+        <div className="flex items-center gap-4">
+          <Avatar name={user.name} image={user.image} size={14}/>
+          <div className="flex-1 min-w-0">
+            <p className="text-white font-bold text-base truncate">{user.name}</p>
+            <p className="text-green-200 text-xs truncate">{user.email}</p>
+            <div className="flex gap-2 mt-2 flex-wrap">
+              <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium capitalize">
+                {user.role}
+              </span>
+              {user.dept && (
+                <span className="bg-green-600 text-green-100 text-xs px-2 py-0.5 rounded-full font-medium">
+                  {user.dept}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Stats ── */}
+      <div className="grid grid-cols-4 gap-2 mb-5">
+        {STAT_ITEMS.map(s => (
+          <div key={s.label}
+            className="bg-white rounded-2xl border border-green-100 shadow-card p-3 text-center">
+            <p className={`text-xl font-bold ${s.color}`}>{s.value}</p>
+            <p className="text-[10px] text-gray-400 mt-0.5 font-medium">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Account info ── */}
+      <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
+        <div className="px-4 py-3 border-b border-green-50">
+          <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Account Information</p>
+        </div>
+        {[
+          { label: 'Full Name',  value: user.name },
+          { label: 'Email',      value: user.email },
+          { label: 'Role',       value: user.role?.charAt(0).toUpperCase() + user.role?.slice(1) },
+          { label: 'Department', value: user.dept || '—' },
+          { label: 'Status',
+            value: (
+              <span className="inline-block bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-semibold">
+                Active
+              </span>
+            )
+          }
+        ].map(row => (
+          <div key={row.label}
+            className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+            <span className="text-xs text-gray-500 font-medium">{row.label}</span>
+            <span className="text-xs text-gray-800 font-semibold text-right max-w-[55%] truncate">
+              {row.value}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Type-specific fields ── */}
+      {user.userType === 'student' && (
+        <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
+          <div className="px-4 py-3 border-b border-green-50">
+            <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Student Details</p>
+          </div>
+          {[
+            { label: 'Student ID',   value: user.studentId },
+            { label: 'Year & Section', value: `${user.year} — ${user.section}` }
+          ].map(row => (
+            <div key={row.label}
+              className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+              <span className="text-xs text-gray-500 font-medium">{row.label}</span>
+              <span className="text-xs text-gray-800 font-semibold">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {user.userType === 'employee' && (
+        <div className="bg-white rounded-2xl border border-green-100 shadow-card mb-5 overflow-hidden">
+          <div className="px-4 py-3 border-b border-green-50">
+            <p className="text-xs font-bold text-green-700 uppercase tracking-wide">Employee Details</p>
+          </div>
+          {[
+            { label: 'Employee No.', value: user.employeeNum },
+            { label: 'Position',     value: user.position    },
+            { label: 'Office',       value: user.office      }
+          ].map(row => (
+            <div key={row.label}
+              className="flex items-center justify-between px-4 py-3 border-b border-green-50 last:border-0">
+              <span className="text-xs text-gray-500 font-medium">{row.label}</span>
+              <span className="text-xs text-gray-800 font-semibold">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Notifications ── */}
+      <div className="mb-5">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-sm font-bold text-green-800">Notifications</p>
+          <span className="text-xs text-gray-400">
+            {notifications.filter(n => !n.isRead).length} unread
+          </span>
+        </div>
+
+        {nLoading
+          ? <Spinner/>
+          : notifications.length === 0
+            ? (
+              <div className="bg-white rounded-xl border border-green-100 p-5 text-center">
+                <p className="text-2xl mb-1">🔔</p>
+                <p className="text-xs text-gray-400">No notifications yet.</p>
+              </div>
+            )
+            : (
+              <>
+                <div className="space-y-2">
+                  {visibleNotifs.map(n => (
+                    <div key={n.id} onClick={() => !n.isRead && markRead(n.id)}
+                      className={`bg-white rounded-xl border shadow-card p-3 transition cursor-pointer
+                        ${n.isRead
+                          ? 'border-green-50 opacity-70'
+                          : 'border-green-200 hover:bg-green-50'}`}>
+                      <div className="flex gap-2">
+                        {!n.isRead && (
+                          <span className="w-2 h-2 rounded-full bg-green-500 mt-1.5 flex-shrink-0"/>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs font-semibold text-gray-800">{n.title}</p>
+                          <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{n.message}</p>
+                          <p className="text-[10px] text-gray-300 mt-1">{fmtTime(n.createdAt)}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {notifications.length > 5 && (
+                  <button onClick={() => setShowAllNotifs(!showAllNotifs)}
+                    className="mt-2 w-full text-center text-xs text-green-600 font-semibold py-2">
+                    {showAllNotifs
+                      ? '▲ Show less'
+                      : `▼ Show all ${notifications.length} notifications`}
+                  </button>
+                )}
+              </>
+            )
+        }
+      </div>
+
+      {/* ── Sign out ── */}
+      <button onClick={handleSignOut} disabled={signingOut}
+        className="w-full border-2 border-red-200 text-red-500 font-semibold py-3.5 rounded-2xl
+          hover:bg-red-50 transition disabled:opacity-50 mb-8">
+        {signingOut ? 'Signing out…' : '↩ Sign Out'}
+      </button>
+    </AppLayout>
   )
 }
 
@@ -8819,6 +8514,371 @@ export default function BorrowCard({ borrow, book }) {
       )}
     </div>
   )
+}
+</file>
+
+<file path="pages/chat.jsx">
+import { useRef, useEffect, useState } from 'react'
+import { useSession }      from 'next-auth/react'
+import { useRouter }       from 'next/router'
+import { v4 as uuid }      from 'uuid'
+import MessageBubble       from '../components/chat/MessageBubble'
+import ComplaintTag        from '../components/chat/ComplaintTag'
+import Spinner             from '../components/ui/Spinner'
+import Toast               from '../components/ui/Toast'
+import Logo                from '../components/ui/Logo'
+import { useChat }         from '../hooks/useChat'
+import { useNotifications } from '../hooks/useNotifications'
+
+const MSG_TYPES = [
+  { id: 'INQUIRY',   label: '🔍 Inquiry',   desc: 'Ask about books or services' },
+  { id: 'FEEDBACK',  label: '💬 Feedback',  desc: 'Share your experience' },
+  { id: 'COMPLAINT', label: '⚠️ Complaint', desc: 'Report an issue' }
+]
+const LIBRARIES = [
+  { id: 'HIGH_SCHOOL',  label: '🏫 High School Library', desc: 'For HS students and faculty' },
+  { id: 'MAIN_LIBRARY', label: '📚 Main Library',        desc: 'For college departments' }
+]
+
+function fmtTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const now = new Date()
+  if (d.toDateString() === now.toDateString())
+    return d.toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })
+}
+
+export default function ChatPage() {
+  const router = useRouter()
+  const { data: session }  = useSession()
+  const { notifications, markRead } = useNotifications()
+  const {
+    threads, threadsLoading,
+    messages, messagesLoading,
+    activeThreadId, setActiveThreadId,
+    sendMessage
+  } = useChat()
+
+  const userId = session?.user?.id
+
+  const [showNewForm, setShowNewForm] = useState(false)
+  const [newMsgType,  setNewMsgType]  = useState(null)
+  const [newLibrary,  setNewLibrary]  = useState(null)
+  const [newText,     setNewText]     = useState('')
+  const [startingNew, setStartingNew] = useState(false)
+
+  const [replyText,  setReplyText]  = useState('')
+  const [isSending,  setIsSending]  = useState(false)
+  const submitLockRef = useRef(false)
+  const lastSubmitRef = useRef(0)
+
+  const [toast, setToast] = useState(null)
+  const bottomRef   = useRef(null)
+  const textareaRef = useRef(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  useEffect(() => {
+    if (!notifications.length) return
+    notifications
+      .filter(n => !n.isRead && n.type === 'CHAT_REPLY')
+      .forEach(n => markRead(n.id))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notifications.length])
+
+  const activeThread = threads.find(t => t.threadId === activeThreadId) || null
+  const isResolved   = activeThread?.threadStatus === 'RESOLVED'
+
+  async function handleCreateTicket() {
+    if (!newText.trim() || !newMsgType || !newLibrary) {
+      setToast({ message: 'Please fill in all fields', type: 'error' })
+      return
+    }
+    setStartingNew(true)
+    const newThreadId = uuid()
+    try {
+      await sendMessage(newText.trim(), newMsgType, newLibrary, newThreadId)
+      setShowNewForm(false); setNewText(''); setNewMsgType(null); setNewLibrary(null)
+      setActiveThreadId(newThreadId)
+    } catch (err) {
+      setToast({ message: err.message || 'Failed to create ticket.', type: 'error' })
+    } finally {
+      setStartingNew(false)
+    }
+  }
+
+  async function handleReply() {
+    const trimmed = replyText.trim()
+    if (!trimmed || submitLockRef.current || isSending || isResolved) return
+    const now = Date.now()
+    if (now - lastSubmitRef.current < 1000) return
+
+    submitLockRef.current = true
+    setIsSending(true)
+    lastSubmitRef.current = now
+    setReplyText('')
+
+    try {
+      await sendMessage(trimmed)
+    } catch (err) {
+      if (!err.message?.includes('progress')) {
+        setReplyText(trimmed)
+        setToast({ message: err.message || 'Failed to send.', type: 'error' })
+      }
+    } finally {
+      setTimeout(() => { submitLockRef.current = false; setIsSending(false) }, 1500)
+      textareaRef.current?.focus()
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault(); e.stopPropagation()
+      if (!submitLockRef.current && !isSending) handleReply()
+    }
+  }
+
+  const canSend = replyText.trim() && !submitLockRef.current && !isSending && !isResolved
+
+  return (
+    <div className="min-h-screen bg-green-50 flex flex-col safe-top">
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)}/>}
+
+      {/* ── Top bar ── */}
+      <header className="bg-green-800 text-white px-4 py-3 flex items-center gap-3 shadow-md sticky top-0 z-30">
+        {/* Back / Logo */}
+        {activeThreadId
+          ? (
+            <button onClick={() => setActiveThreadId(null)}
+              className="p-1 rounded-full hover:bg-green-700 transition flex-shrink-0">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
+              </svg>
+            </button>
+          )
+          : (
+            <button onClick={() => router.back()}
+              className="p-1 rounded-full hover:bg-green-700 transition flex-shrink-0">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7"/>
+              </svg>
+            </button>
+          )
+        }
+
+        {/* Logo */}
+        <div className="flex-shrink-0">
+          <Logo size={8} dark={true}/>
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-sm">
+            {activeThreadId
+              ? `${LIBRARIES.find(l => l.id === activeThread?.library)?.label.split(' ').slice(1).join(' ') || 'Library'} Support`
+              : 'My Tickets'}
+          </p>
+          <p className="text-green-300 text-xs">
+            {activeThreadId
+              ? isResolved ? '✔ Resolved' : '🟢 Active'
+              : `${threads.length} ticket${threads.length !== 1 ? 's' : ''}`}
+          </p>
+        </div>
+
+        {!activeThreadId && (
+          <button onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
+            className="bg-white text-green-800 text-xs font-bold px-3 py-1.5 rounded-xl
+              hover:bg-green-100 transition flex-shrink-0">
+            + New Ticket
+          </button>
+        )}
+      </header>
+
+      {/* ── Thread list ── */}
+      {!activeThreadId && (
+        <div className="flex-1 overflow-y-auto max-w-lg mx-auto w-full">
+
+          {showNewForm && (
+            <div className="m-4 bg-white rounded-2xl border border-green-200 p-4 shadow-sm space-y-3">
+              <p className="text-sm font-bold text-green-800">New Support Ticket</p>
+
+              <div>
+                <p className="text-xs font-semibold text-green-700 mb-1.5 uppercase tracking-wide">Library</p>
+                <div className="grid grid-cols-2 gap-2">
+                  {LIBRARIES.map(lib => (
+                    <button key={lib.id} onClick={() => setNewLibrary(lib.id)}
+                      className={`p-2.5 rounded-xl border-2 text-xs font-semibold text-left transition
+                        ${newLibrary === lib.id
+                          ? 'border-green-600 bg-green-50 text-green-700'
+                          : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                      {lib.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-semibold text-green-700 mb-1.5 uppercase tracking-wide">Type</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {MSG_TYPES.map(t => (
+                    <button key={t.id} onClick={() => setNewMsgType(t.id)}
+                      className={`p-2 rounded-xl border-2 text-center text-xs font-semibold transition
+                        ${newMsgType === t.id
+                          ? 'border-green-600 bg-green-50 text-green-700'
+                          : 'border-gray-200 text-gray-600 hover:border-green-300'}`}>
+                      <span className="block text-base">{t.label.split(' ')[0]}</span>
+                      {t.label.split(' ')[1]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <textarea value={newText} onChange={e => setNewText(e.target.value)} rows={3}
+                placeholder="Describe your inquiry, feedback, or complaint…"
+                className="w-full border border-green-200 rounded-xl px-3 py-2 text-sm
+                  focus:outline-none focus:ring-2 focus:ring-green-500 resize-none bg-green-50"/>
+
+              <div className="flex gap-2">
+                <button onClick={() => { setShowNewForm(false); setNewText(''); setNewMsgType(null); setNewLibrary(null) }}
+                  className="flex-1 border-2 border-gray-200 text-gray-600 text-xs font-semibold
+                    py-2 rounded-xl hover:bg-gray-50 transition">
+                  Cancel
+                </button>
+                <button onClick={handleCreateTicket}
+                  disabled={startingNew || !newText.trim() || !newMsgType || !newLibrary}
+                  className="flex-1 bg-green-700 text-white text-xs font-semibold py-2 rounded-xl
+                    hover:bg-green-800 transition disabled:opacity-50">
+                  {startingNew ? 'Sending…' : '✔ Submit Ticket'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {threadsLoading ? (
+            <Spinner/>
+          ) : threads.length === 0 && !showNewForm ? (
+            <div className="flex flex-col items-center justify-center h-64 text-center px-6">
+              <span className="text-5xl mb-4">💬</span>
+              <p className="font-semibold text-green-800">No tickets yet</p>
+              <p className="text-gray-400 text-sm mt-1">Tap <strong>+ New Ticket</strong> to contact library staff.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-green-50">
+              {threads.map(t => {
+                const lib      = LIBRARIES.find(l => l.id === t.library)
+                const resolved = t.threadStatus === 'RESOLVED'
+                return (
+                  <button key={t.threadId}
+                    onClick={() => { setActiveThreadId(t.threadId); setShowNewForm(false) }}
+                    className="w-full text-left px-4 py-4 hover:bg-green-50 transition flex gap-3 items-start">
+                    <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center
+                      text-white text-sm font-bold ${resolved ? 'bg-gray-400' : 'bg-green-600'}`}>
+                      {t.messageType === 'COMPLAINT' ? '⚠' : t.messageType === 'FEEDBACK' ? '💬' : '🔍'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <ComplaintTag type={t.messageType}/>
+                          {resolved && (
+                            <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">
+                              ✔ Resolved
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-gray-400 flex-shrink-0">{fmtTime(t.lastTimestamp)}</span>
+                      </div>
+                      <p className="text-xs text-green-700 mt-0.5 font-medium">{lib?.label || t.library}</p>
+                      <p className="text-xs text-gray-500 mt-0.5 truncate">{t.lastMessage}</p>
+                    </div>
+                    {t.unreadCount > 0 && (
+                      <span className="flex-shrink-0 w-5 h-5 bg-red-500 text-white text-[10px]
+                        font-bold rounded-full flex items-center justify-center">
+                        {t.unreadCount > 9 ? '9+' : t.unreadCount}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Thread detail ── */}
+      {activeThreadId && (
+        <>
+          <div className="flex-1 overflow-y-auto px-4 pt-4 pb-4 max-w-lg mx-auto w-full chat-scroll">
+            {messagesLoading ? <Spinner/> : (
+              <>
+                <div className="bg-green-100 rounded-xl px-3 py-2 mb-4 text-center">
+                  <p className="text-xs text-green-700">
+                    💡 Library staff will reply as soon as possible. Please be patient.
+                  </p>
+                </div>
+                {messages.map(msg => (
+                  <MessageBubble key={msg.id} msg={msg} isOwn={msg.senderId === userId}/>
+                ))}
+                {isResolved && (
+                  <div className="text-center my-4 space-y-3">
+                    <span className="bg-gray-100 text-gray-500 text-xs px-3 py-1 rounded-full inline-block">
+                      ✔ This conversation has been resolved
+                    </span>
+                    <div>
+                      <button onClick={() => { setShowNewForm(true); setActiveThreadId(null) }}
+                        className="bg-green-700 hover:bg-green-800 text-white text-xs
+                          font-semibold px-4 py-2 rounded-xl transition">
+                        + Open New Ticket
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <div ref={bottomRef}/>
+              </>
+            )}
+          </div>
+
+          {!isResolved && (
+            <form onSubmit={e => { e.preventDefault(); e.stopPropagation() }}
+              className="sticky bottom-0 w-full max-w-lg mx-auto bg-white border-t border-green-100 px-4 py-3">
+              <div className="flex gap-2 items-end">
+                <textarea ref={textareaRef} value={replyText}
+                  onChange={e => setReplyText(e.target.value)}
+                  onKeyDown={handleKeyDown} rows={1} disabled={isSending}
+                  placeholder="Type a reply…"
+                  className="flex-1 resize-none border border-green-200 rounded-xl px-3 py-2 text-sm
+                    focus:outline-none focus:ring-2 focus:ring-green-500 max-h-28 bg-green-50
+                    placeholder-gray-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{ overflowY: replyText.split('\n').length > 3 ? 'auto' : 'hidden' }}/>
+                <button onClick={handleReply} disabled={!canSend} type="button"
+                  className="w-10 h-10 rounded-xl bg-green-700 text-white flex items-center
+                    justify-center disabled:opacity-40 hover:bg-green-800 transition flex-shrink-0">
+                  {isSending
+                    ? <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"/>
+                        <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75"/>
+                      </svg>
+                    : <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                      </svg>
+                  }
+                </button>
+              </div>
+            </form>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+export async function getServerSideProps(ctx) {
+  const { getServerSession } = await import('next-auth/next')
+  const { authOptions }      = await import('./api/auth/[...nextauth]')
+  const session = await getServerSession(ctx.req, ctx.res, authOptions)
+  if (!session) return { redirect: { destination: '/auth/signin', permanent: false } }
+  return { props: {} }
 }
 </file>
 
